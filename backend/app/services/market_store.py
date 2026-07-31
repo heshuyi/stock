@@ -395,6 +395,50 @@ def resolve_signal_date(today: date | None = None) -> str | None:
     return row["d"] if row and row["d"] else None
 
 
+def list_trading_dates(
+    symbol: str = "HS300",
+    start: str | None = None,
+    end: str | None = None,
+) -> list[str]:
+    """Distinct trading dates from warehouse bars, ascending."""
+    ensure_store()
+    clauses = ["symbol=?"]
+    params: list[Any] = [symbol]
+    if start:
+        clauses.append("date>=?")
+        params.append(start)
+    if end:
+        clauses.append("date<=?")
+        params.append(end)
+    sql = (
+        "SELECT DISTINCT date FROM market_bars WHERE "
+        + " AND ".join(clauses)
+        + " ORDER BY date ASC"
+    )
+    with connect() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    dates = [str(r["date"]) for r in rows]
+    if dates:
+        return dates
+    # Fallback: any symbol's calendar
+    clauses = ["1=1"]
+    params = []
+    if start:
+        clauses.append("date>=?")
+        params.append(start)
+    if end:
+        clauses.append("date<=?")
+        params.append(end)
+    sql = (
+        "SELECT DISTINCT date FROM market_bars WHERE "
+        + " AND ".join(clauses)
+        + " ORDER BY date ASC"
+    )
+    with connect() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return [str(r["date"]) for r in rows]
+
+
 def month_range(start: date, end: date) -> list[str]:
     months: list[str] = []
     y, m = start.year, start.month

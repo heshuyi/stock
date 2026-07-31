@@ -137,6 +137,15 @@ export default function HomePage() {
               ? `信号日期（T-1） ${data.date}`
               : "加载中…"}
             {data?.normalized ? " · 已按预算上限缩放" : ""}
+            {data
+              ? data.execution_today
+                ? " · 今日执行定投"
+                : ` · 非执行日${
+                    data.next_execution_date
+                      ? `（下一：${data.next_execution_date}）`
+                      : ""
+                  }`
+              : ""}
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -152,7 +161,10 @@ export default function HomePage() {
                 })}
               </p>
               <p className="text-xs opacity-70">
-                基准定额 ¥{data.base_amount.toLocaleString("zh-CN")}
+                月预算 ¥{data.base_amount.toLocaleString("zh-CN")} · 本期 ¥
+                {(data.period_amount ?? data.base_amount).toLocaleString(
+                  "zh-CN"
+                )}
               </p>
             </div>
           )}

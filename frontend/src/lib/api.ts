@@ -25,9 +25,15 @@ export interface EnsembleItem {
   hard_veto: boolean;
 }
 
+export type BuyFrequency = "daily" | "weekly" | "monthly";
+
 export interface Dashboard {
   date: string;
   base_amount: number;
+  period_amount: number;
+  buy_frequency: BuyFrequency;
+  execution_today: boolean;
+  next_execution_date?: string | null;
   total_buy_amount: number;
   normalized: boolean;
   items: EnsembleItem[];
@@ -71,7 +77,9 @@ export interface UserSettings {
   target_weights?: Record<string, number> | null;
   ma_short: number;
   ma_long: number;
-  buy_frequency: "daily" | "weekly";
+  buy_frequency: BuyFrequency;
+  weekly_weekday: number;
+  monthly_day: number;
   profit_take_enabled: boolean;
   profit_take_return: number;
   valuation_reduce_percentile: number;

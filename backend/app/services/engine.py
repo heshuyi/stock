@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date, timedelta
 from typing import Any
 
 from app.db import (
@@ -12,6 +13,12 @@ from app.db import (
 from app.models import DashboardResponse, EnsembleResult, Holding, Portfolio
 from app.services.market_data import get_signal_market, warm_latest_snapshots
 from app.services import market_store
+from app.services.schedule import (
+    extend_calendar,
+    is_execution_day,
+    next_execution_date,
+    period_amount,
+)
 from app.strategies.ensemble import (
     apply_cash_pool,
     cash_pool_factor,
@@ -40,6 +47,23 @@ def _clamp_signal_date(as_of: str | None) -> tuple[str | None, str]:
     return clamped, mode
 
 
+def _suppress_buys_for_non_execution(
+    items: list[EnsembleResult],
+) -> list[EnsembleResult]:
+    """Zero buy amounts off schedule; keep reduce/pause signals."""
+    out: list[EnsembleResult] = []
+    for item in items:
+        if item.action == "buy" and item.amount > 0:
+            data = item.model_dump()
+            data["action"] = "hold"
+            data["amount"] = 0.0
+            data["reason"] = "非定投执行日，仅观察；" + item.reason
+            out.append(EnsembleResult.model_validate(data))
+        else:
+            out.append(item)
+    return out
+
+
 async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
     cfg = load_app_config()
     settings = await get_user_settings()
@@ -54,6 +78,41 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
     await warm_latest_snapshots()
 
     signal_date, as_of_mode = _clamp_signal_date(as_of)
+    execution_day = date.today()
+    trading_days = extend_calendar(
+        market_store.list_trading_dates(
+            start=f"{execution_day.year - 1}-01-01",
+            end=f"{execution_day.year + 1}-12-31",
+        ),
+        until=date(execution_day.year + 1, 12, 31),
+        from_date=execution_day - timedelta(days=5),
+    )
+    p_amount = period_amount(
+        settings.base_amount,
+        settings.buy_frequency,
+        year=execution_day.year,
+        month=execution_day.month,
+        trading_days=trading_days,
+    )
+    exec_today = is_execution_day(
+        execution_day,
+        settings.buy_frequency,
+        weekly_weekday=settings.weekly_weekday,
+        monthly_day=settings.monthly_day,
+        trading_days=trading_days,
+    )
+    next_exec = next_execution_date(
+        execution_day if not exec_today else execution_day,
+        settings.buy_frequency,
+        weekly_weekday=settings.weekly_weekday,
+        monthly_day=settings.monthly_day,
+        trading_days=trading_days,
+    )
+    # If today is an execution day, next_execution_date should still report today
+    # or the following one for display; prefer today when executing.
+    if exec_today:
+        next_exec = execution_day.isoformat()
+
     sample = (
         await get_signal_market(cfg.symbols[0].id, signal_date) if signal_date else None
     )
@@ -63,6 +122,10 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
         return DashboardResponse(
             date=as_of or "",
             base_amount=settings.base_amount,
+            period_amount=p_amount,
+            buy_frequency=settings.buy_frequency,
+            execution_today=exec_today,
+            next_execution_date=next_exec,
             total_buy_amount=0,
             normalized=False,
             items=[],
@@ -77,6 +140,21 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
         warning = f"历史回看信号日 {signal_date}（已钳制不超过 T-1）"
     else:
         warning = f"信号基于前一交易日 {signal_date}（T-1）收盘数据"
+
+    freq_label = {"daily": "每日", "weekly": "每周", "monthly": "每月"}[
+        settings.buy_frequency
+    ]
+    if exec_today:
+        warning = (
+            (warning + "；" if warning else "")
+            + f"今日为{freq_label}定投执行日，本期基准 ¥{p_amount:,.2f}"
+        )
+    else:
+        warning = (
+            (warning + "；" if warning else "")
+            + f"今日非{freq_label}定投执行日，买入金额为 0"
+            + (f"，下一执行日 {next_exec}" if next_exec else "")
+        )
 
     latest_by_symbol: dict[str, dict[str, Any]] = {}
     for sym in cfg.symbols:
@@ -187,7 +265,7 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
             etf_code=sym.etf_code,
             target_weight=tw,
             signals=strategy_signals,
-            base_amount=settings.base_amount,
+            base_amount=p_amount,
             hard_veto_enabled=settings.hard_veto_enabled,
             weights=profile.strategy_weights,
             profile=profile,
@@ -195,7 +273,6 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
         )
         items.append(result)
 
-        # Persist operational trend / trailing state (not take_profit_stage).
         base_h = holdings_by_id.get(sym.id) or Holding(symbol=sym.id)
         trend_state = s_trend.meta.get("trend_state")
         updated_holdings.append(
@@ -211,7 +288,6 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
             )
         )
 
-    # Keep any holdings for unknown symbols untouched.
     known = {h.symbol for h in updated_holdings}
     for h in portfolio.holdings:
         if h.symbol not in known:
@@ -219,7 +295,7 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
     await save_portfolio(Portfolio(holdings=updated_holdings, cash=portfolio.cash))
 
     items, floor_applied = ensure_minimum_investment(
-        items, settings.base_amount, cfg.defaults.minimum_invest_ratio
+        items, p_amount, cfg.defaults.minimum_invest_ratio
     )
     if floor_applied:
         warning = (
@@ -236,15 +312,21 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
         if pool_factor < 0.5:
             warning += "（弹药偏薄，已额外降速）"
 
-    items, normalized = normalize_amounts(
-        items, settings.base_amount, cap_ratio
-    )
+    items, normalized = normalize_amounts(items, p_amount, cap_ratio)
+
+    if not exec_today:
+        items = _suppress_buys_for_non_execution(items)
+
     total_buy = sum(i.amount for i in items if i.action == "buy")
 
     db = get_db()
     payload = {
         "date": signal_date,
         "base_amount": settings.base_amount,
+        "period_amount": p_amount,
+        "buy_frequency": settings.buy_frequency,
+        "execution_today": exec_today,
+        "next_execution_date": next_exec,
         "total_buy_amount": total_buy,
         "normalized": normalized,
         "items": [i.model_dump() for i in items],
@@ -261,6 +343,10 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
     return DashboardResponse(
         date=signal_date,
         base_amount=settings.base_amount,
+        period_amount=p_amount,
+        buy_frequency=settings.buy_frequency,
+        execution_today=exec_today,
+        next_execution_date=next_exec,
         total_buy_amount=round(total_buy, 2),
         normalized=normalized,
         items=items,

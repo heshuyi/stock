@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 
 Action = Literal["buy", "pause", "reduce", "hold"]
+BuyFrequency = Literal["daily", "weekly", "monthly"]
 TrendState = Literal["bull", "mild_bull", "sandwich", "bear"]
 ValuationMode = Literal["pe", "pe_pb_composite"]
 PercentileWindow = Literal["5y", "full"]
@@ -65,7 +66,9 @@ class StrategyDefaults(BaseModel):
     hard_veto_enabled: bool = True
     normalize_buy_cap: float = 1.5
     minimum_invest_ratio: float = 0.0
-    buy_frequency: Literal["daily", "weekly"] = "daily"
+    buy_frequency: BuyFrequency = "monthly"
+    weekly_weekday: int = Field(default=1, ge=1, le=5)
+    monthly_day: int = Field(default=1, ge=1, le=28)
     profit_take_enabled: bool = True
     profit_take_return: float = 0.30
     valuation_reduce_percentile: float = 0.80
@@ -132,7 +135,9 @@ class UserSettings(BaseModel):
     target_weights: dict[str, float] | None = None
     ma_short: int = 60
     ma_long: int = 120
-    buy_frequency: Literal["daily", "weekly"] = "daily"
+    buy_frequency: BuyFrequency = "monthly"
+    weekly_weekday: int = Field(default=1, ge=1, le=5)
+    monthly_day: int = Field(default=1, ge=1, le=28)
     profit_take_enabled: bool = True
     profit_take_return: float = 0.30
     valuation_reduce_percentile: float = 0.80
@@ -142,6 +147,10 @@ class UserSettings(BaseModel):
 class DashboardResponse(BaseModel):
     date: str
     base_amount: float
+    period_amount: float = 0.0
+    buy_frequency: BuyFrequency = "monthly"
+    execution_today: bool = True
+    next_execution_date: str | None = None
     total_buy_amount: float
     normalized: bool
     items: list[EnsembleResult]

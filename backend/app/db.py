@@ -58,6 +58,8 @@ def _default_settings(cfg: AppConfig) -> UserSettings:
         ma_short=cfg.defaults.ma_short,
         ma_long=cfg.defaults.ma_long,
         buy_frequency=cfg.defaults.buy_frequency,
+        weekly_weekday=cfg.defaults.weekly_weekday,
+        monthly_day=cfg.defaults.monthly_day,
         profit_take_enabled=cfg.defaults.profit_take_enabled,
         profit_take_return=cfg.defaults.profit_take_return,
         valuation_reduce_percentile=cfg.defaults.valuation_reduce_percentile,
@@ -161,9 +163,13 @@ async def get_user_settings() -> UserSettings:
         symbol.id: float(weights.get(symbol.id, symbol.target_weight))
         for symbol in cfg.symbols
     }
-    # Buys are daily; migrate any leftover weekly preference.
-    if doc.get("buy_frequency") == "weekly":
-        doc["buy_frequency"] = "daily"
+    # Defaults for new schedule fields on older saved settings.
+    if doc.get("buy_frequency") not in {"daily", "weekly", "monthly"}:
+        doc["buy_frequency"] = cfg.defaults.buy_frequency
+    if doc.get("weekly_weekday") is None:
+        doc["weekly_weekday"] = cfg.defaults.weekly_weekday
+    if doc.get("monthly_day") is None:
+        doc["monthly_day"] = cfg.defaults.monthly_day
     return UserSettings.model_validate(doc)
 
 

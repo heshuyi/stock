@@ -21,7 +21,12 @@ export default function SettingsPage() {
     Promise.all([api.symbols(), api.settings(), api.portfolio()])
       .then(([sym, set, port]) => {
         setSymbols(sym.symbols);
-        setSettings(set);
+        setSettings({
+          ...set,
+          buy_frequency: set.buy_frequency || "monthly",
+          weekly_weekday: set.weekly_weekday ?? 1,
+          monthly_day: set.monthly_day ?? 1,
+        });
         const ids = sym.symbols.map((s) => s.id);
         const holdings = (ids.length ? ids : DEFAULT_SYMBOLS).map((id) => {
           const existing = port.holdings.find((h) => h.symbol === id);
@@ -73,14 +78,14 @@ export default function SettingsPage() {
     <main>
       <h1 className="font-display text-3xl text-ink">持仓与设置</h1>
       <p className="mt-1 text-sm text-ink/60">
-        修改月定投基准额、可支配储备、目标分配比例与当前持仓
+        月预算 + 定投频率（系统自动折算本期金额）、可支配储备与持仓
       </p>
 
       <section className="mt-8 rounded-xl border border-ink/10 bg-white/70 p-5">
         <h2 className="font-display text-xl">全局参数</h2>
         <div className="mt-4 grid gap-4 sm:grid-cols-2">
           <label className="block text-sm">
-            <span className="text-ink/60">月定投基准额（元）</span>
+            <span className="text-ink/60">月定投总预算（元）</span>
             <input
               type="number"
               className="mt-1 w-full rounded-md border border-ink/15 bg-paper/50 px-3 py-2"
@@ -92,7 +97,75 @@ export default function SettingsPage() {
                 })
               }
             />
+            <span className="mt-1 block text-xs text-ink/45">
+              不随频率改变含义；每日/每周会按当月交易日或周数拆分
+            </span>
           </label>
+          <label className="block text-sm">
+            <span className="text-ink/60">定投频率</span>
+            <select
+              className="mt-1 w-full rounded-md border border-ink/15 bg-paper/50 px-3 py-2"
+              value={settings.buy_frequency}
+              onChange={(e) =>
+                setSettings({
+                  ...settings,
+                  buy_frequency: e.target.value as
+                    | "daily"
+                    | "weekly"
+                    | "monthly",
+                })
+              }
+            >
+              <option value="daily">每日（每个交易日）</option>
+              <option value="weekly">每周</option>
+              <option value="monthly">每月</option>
+            </select>
+          </label>
+          {settings.buy_frequency === "weekly" && (
+            <label className="block text-sm">
+              <span className="text-ink/60">每周定投日</span>
+              <select
+                className="mt-1 w-full rounded-md border border-ink/15 bg-paper/50 px-3 py-2"
+                value={settings.weekly_weekday}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    weekly_weekday: Number(e.target.value),
+                  })
+                }
+              >
+                <option value={1}>周一</option>
+                <option value={2}>周二</option>
+                <option value={3}>周三</option>
+                <option value={4}>周四</option>
+                <option value={5}>周五</option>
+              </select>
+              <span className="mt-1 block text-xs text-ink/45">
+                遇休市顺延至本周下一交易日
+              </span>
+            </label>
+          )}
+          {settings.buy_frequency === "monthly" && (
+            <label className="block text-sm">
+              <span className="text-ink/60">每月定投日（1–28）</span>
+              <input
+                type="number"
+                min={1}
+                max={28}
+                className="mt-1 w-full rounded-md border border-ink/15 bg-paper/50 px-3 py-2"
+                value={settings.monthly_day}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    monthly_day: Number(e.target.value),
+                  })
+                }
+              />
+              <span className="mt-1 block text-xs text-ink/45">
+                遇休市顺延至本月下一交易日
+              </span>
+            </label>
+          )}
           <label className="block text-sm">
             <span className="text-ink/60">可支配定投储备（元）</span>
             <input
@@ -183,8 +256,8 @@ export default function SettingsPage() {
             启用估值武装 + 追踪回撤止盈（分标的阈值）
           </label>
           <p className="text-xs text-ink/50 sm:col-span-2">
-            买入每日可执行。核心仓破位软降频；成长仓空头排列硬停，极端低估可 0.25×
-            解封。止盈按各宽基估值武装线与峰值回撤触发，不再用账户收益率硬止盈。
+            买入仅在所选频率的执行日产生金额；止盈每日检查。核心仓破位软降频；成长仓空头排列硬停，极端低估可
+            0.25× 解封。
           </p>
         </div>
 
