@@ -1,0 +1,13 @@
+---
+description: A-share DCA fund manager persona for strategy and allocation advice
+alwaysApply: false
+---
+
+# 基金经理入口
+
+当用户讨论 **定投、宽基、仓位、估值、今日操作解读、策略微调** 时：
+
+1. 读取并遵循 `.cursor/skills/a-share-dca-fund-manager/SKILL.md`
+2. 需要细节时查阅同目录 `reference.md`
+3. 涉及改代码时对齐 `PRD.md` 与 `backend/app/strategies/`
+4. 投资相关回复必须带风险声明

@@ -1,0 +1,173 @@
+from __future__ import annotations
+
+from app.models import EnsembleResult, StrategySignal
+
+
+STRATEGY_WEIGHTS = {
+    "valuation": 0.6,
+    "trend": 0.4,
+}
+
+
+def _clip(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, value))
+
+
+def ensemble(
+    *,
+    symbol: str,
+    name: str,
+    etf_code: str,
+    target_weight: float,
+    signals: list[StrategySignal],
+    base_amount: float,
+    hard_veto_enabled: bool = True,
+    weights: dict[str, float] | None = None,
+) -> EnsembleResult:
+    """Weighted valuation/trend merge with hard-veto protection."""
+    wmap = weights or STRATEGY_WEIGHTS
+    by_name = {s.strategy: s for s in signals}
+
+    valuation = by_name.get("valuation")
+    trend = by_name.get("trend")
+
+    hard_veto = False
+    veto_reasons: list[str] = []
+    valuation_pause = bool(valuation and valuation.action == "pause")
+    valuation_missing = bool(valuation and valuation.meta.get("data_missing"))
+    trend_break = bool(trend and trend.meta.get("trend_break"))
+    if hard_veto_enabled:
+        if valuation_missing:
+            hard_veto = True
+            veto_reasons.append(valuation.reason)
+        elif valuation_pause and trend_break:
+            hard_veto = True
+            veto_reasons.append(valuation.reason)
+            if trend:
+                veto_reasons.append(trend.reason)
+        # profitable trend-break reduce still blocks new buys
+        if trend and trend.action == "reduce" and trend.multiplier <= 0:
+            hard_veto = True
+            if trend.reason not in veto_reasons:
+                veto_reasons.append(trend.reason)
+
+    reduce_ratios = [
+        s.reduce_ratio for s in signals if s.reduce_ratio is not None
+    ]
+    max_reduce = max(reduce_ratios) if reduce_ratios else None
+    any_reduce = any(s.action == "reduce" for s in signals)
+
+    if hard_veto:
+        action = "reduce" if any_reduce and max_reduce else "pause"
+        final_mult = 0.0
+        reason = "硬否决：" + "；".join(veto_reasons)
+    else:
+        numer = 0.0
+        denom = 0.0
+        for s in signals:
+            w = float(wmap.get(s.strategy, 0.0))
+            if w <= 0:
+                continue
+            numer += w * s.multiplier
+            denom += w
+        final_mult = _clip(numer / denom if denom else 0.0, 0.0, 2.0)
+
+        if any_reduce and max_reduce:
+            action = "reduce"
+            reason = (
+                f"加权合成倍数 {final_mult:.2f}；同时建议减仓 "
+                f"{max_reduce:.0%}"
+            )
+        elif final_mult <= 1e-9:
+            action = "pause" if trend_break else "hold"
+            reason = "趋势破位，暂停新增" if trend_break else "合成倍数接近 0，观望"
+        else:
+            action = "buy"
+            parts = [
+                f"{s.strategy} {float(wmap.get(s.strategy, 0.0)):.0%}×{s.multiplier:.2f}"
+                for s in signals
+                if float(wmap.get(s.strategy, 0.0)) > 0
+            ]
+            reason = f"加权合成 {final_mult:.2f}（{' + '.join(parts)}）"
+
+    amount = (
+        round(base_amount * target_weight * final_mult, 2)
+        if action == "buy"
+        else 0.0
+    )
+
+    return EnsembleResult(
+        symbol=symbol,
+        name=name,
+        etf_code=etf_code,
+        target_weight=target_weight,
+        action=action,
+        multiplier=round(final_mult, 4),
+        amount=amount,
+        reduce_ratio=max_reduce,
+        reason=reason,
+        strategies=signals,
+        hard_veto=hard_veto,
+    )
+
+
+def normalize_amounts(
+    items: list[EnsembleResult],
+    base_amount: float,
+    cap_ratio: float = 1.5,
+) -> tuple[list[EnsembleResult], bool]:
+    """Scale down buy amounts if total exceeds base_amount * cap_ratio."""
+    total = sum(i.amount for i in items if i.action == "buy" and i.amount > 0)
+    cap = base_amount * cap_ratio
+    if total <= cap or total <= 0:
+        return items, False
+
+    scale = cap / total
+    scaled: list[EnsembleResult] = []
+    for item in items:
+        data = item.model_dump()
+        if item.amount > 0:
+            data["amount"] = round(item.amount * scale, 2)
+            data["reason"] = item.reason + f"（已按预算上限缩放 ×{scale:.2f}）"
+        scaled.append(EnsembleResult.model_validate(data))
+    return scaled, True
+
+
+def ensure_minimum_investment(
+    items: list[EnsembleResult],
+    base_amount: float,
+    floor_ratio: float = 0.25,
+    preferred_symbols: tuple[str, ...] = ("HS300", "ZZ500"),
+) -> tuple[list[EnsembleResult], bool]:
+    """Keep a small DCA floor when every symbol is paused.
+
+    This preserves long-term accumulation discipline for broad indices.
+    """
+    if not items or floor_ratio <= 0:
+        return items, False
+    total = sum(item.amount for item in items if item.amount > 0)
+    if total > 0:
+        return items, False
+
+    floor_total = round(base_amount * floor_ratio, 2)
+    preferred = [item for item in items if item.symbol in preferred_symbols]
+    targets = preferred or items[:2]
+    if not targets:
+        return items, False
+
+    weight_sum = sum(item.target_weight for item in targets) or len(targets)
+    adjusted: list[EnsembleResult] = []
+    target_ids = {item.symbol for item in targets}
+    for item in items:
+        data = item.model_dump()
+        if item.symbol in target_ids:
+            alloc_weight = item.target_weight / weight_sum if weight_sum else 1.0 / len(targets)
+            amount = round(floor_total * alloc_weight, 2)
+            multiplier = round(amount / max(base_amount * item.target_weight, 1e-9), 4)
+            data["action"] = "buy"
+            data["amount"] = amount
+            data["multiplier"] = multiplier
+            data["reason"] = item.reason + "；全组合触发暂停时保留底仓定投"
+            data["hard_veto"] = False
+        adjusted.append(EnsembleResult.model_validate(data))
+    return adjusted, True

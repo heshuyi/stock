@@ -1,0 +1,85 @@
+{
+  "symbols": [
+    {
+      "id": "HS300",
+      "name": "沪深300",
+      "etf_code": "510300",
+      "index_code": "000300",
+      "akshare_symbol": "sh000300",
+      "pe_symbol": "沪深300",
+      "pb_symbol": "沪深300",
+      "valuation_enabled": true,
+      "target_weight": 0.3,
+      "role": "大盘蓝筹核心"
+    },
+    {
+      "id": "ZZ500",
+      "name": "中证500",
+      "etf_code": "510500",
+      "index_code": "000905",
+      "akshare_symbol": "sh000905",
+      "pe_symbol": "中证500",
+      "pb_symbol": "中证500",
+      "valuation_enabled": true,
+      "target_weight": 0.3,
+      "role": "中盘成长"
+    },
+    {
+      "id": "CYB200",
+      "name": "创业板200",
+      "etf_code": "159572",
+      "index_code": "399019",
+      "akshare_symbol": "sz399019",
+      "pe_symbol": "创业板",
+      "pb_symbol": "创业板",
+      "valuation_enabled": true,
+      "valuation_proxy": true,
+      "valuation_proxy_label": "创业板市场代理估值",
+      "target_weight": 0.15,
+      "role": "中盘成长弹性"
+    },
+    {
+      "id": "KCB50",
+      "name": "科创50",
+      "etf_code": "588000",
+      "index_code": "000688",
+      "akshare_symbol": "sh000688",
+      "pe_symbol": "科创版",
+      "pb_symbol": "科创版",
+      "valuation_enabled": true,
+      "valuation_proxy": true,
+      "valuation_proxy_label": "科创板市场代理估值",
+      "target_weight": 0.1,
+      "role": "硬科技成长"
+    },
+    {
+      "id": "SZ50",
+      "name": "上证50",
+      "etf_code": "510050",
+      "index_code": "000016",
+      "akshare_symbol": "sh000016",
+      "pe_symbol": "上证50",
+      "pb_symbol": "上证50",
+      "valuation_enabled": true,
+      "target_weight": 0.15,
+      "role": "超大盘防守"
+    }
+  ],
+  "defaults": {
+    "base_amount": 10000,
+    "ma_short": 60,
+    "ma_long": 120,
+    "hard_veto_enabled": true,
+    "normalize_buy_cap": 1.5,
+    "buy_frequency": "weekly",
+    "profit_take_enabled": true,
+    "profit_take_return": 0.3,
+    "valuation_reduce_percentile": 0.8,
+    "valuation_exit_percentile": 0.9,
+    "strategy_weights": {
+      "valuation": 0.6,
+      "trend": 0.4
+    },
+    "minimum_invest_ratio": 0.0
+  }
+}

@@ -1,0 +1,25 @@
+---
+description: Docker/Compose expert standards for the stock advisor project
+globs: "{Dockerfile,**/Dockerfile,docker-compose.yml,docker-compose.*.yml,**/.dockerignore}"
+alwaysApply: false
+---
+
+# Docker 技术专家
+
+修改或审查容器相关文件时，按本项目拓扑工作：`web → api → mongo`，worker 并行拉行情。
+
+## 硬约束
+
+- `web` 的 `API_URL=http://api:8000` 必须在 **Docker build-arg** 注入（Next rewrite 构建时烘焙）
+- 浏览器只暴露 `web:3000`；不要让浏览器访问 compose 内部主机名 `api`
+- `api`/`worker` 使用 `MONGODB_URI=mongodb://mongo:27017`
+- SQLite `market.db` 通过 `MARKET_DB_PATH` / named volume `market_data` 挂到 `/app/data`，**api 与 worker 必须共享**
+- 生产 compose：api 无 `--reload`；开发用 `docker-compose.dev.yml`
+- `web` 依赖 `api` healthcheck；浏览器只访问宿主机 `3000`
+
+## 常见坑
+
+- 运行时改 `API_URL` 环境变量改不了已 build 的 Next rewrite
+- `depends_on` 无 health ≠ API 已就绪
+- `--reload` + 生产镜像混用
+- 本机 3000/8000 被 `dev.sh` 占用导致 compose 端口冲突

@@ -1,0 +1,28 @@
+---
+description: Python/FastAPI tech standards and review focus for the stock advisor backend
+globs: backend/**/*.py
+alwaysApply: false
+---
+
+# Backend Python 技术专家
+
+审查或修改 `backend/` 时，以 FastAPI + 策略引擎 + SQLite 行情仓专家身份工作。
+
+## 架构约束
+
+- 路由薄：`main.py` 只做参数与调用；逻辑在 `services/`、`strategies/`
+- 行情权威库：`market_store.py` → `backend/data/market.db`
+- 策略决策日：**T-1**（`resolve_signal_date`），禁止用未确认的当日盘中点
+- Dashboard **不得**同步阻塞拉 akshare；同步仅 `/api/jobs/sync` 或 worker
+
+## 策略
+
+- 四策略等权；硬否决（估值/趋势 pause）优先于网格加码
+- 金额：`base_amount * target_weight * final_mult`，超 `normalize_buy_cap` 缩放
+- 改规则必须补/改 `tests/test_strategies.py`
+
+## 性能
+
+- 禁止对上千条历史做逐条 upsert 进 mongomock
+- 月度 backfill：本地校验为主，空月勿反复全量联网 sync
+- 本地开发注意 `NO_PROXY`（见 `scripts/dev.sh`）

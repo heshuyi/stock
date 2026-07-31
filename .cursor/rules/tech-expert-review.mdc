@@ -1,0 +1,12 @@
+---
+description: Invoke stock Python+Frontend tech expert for project reviews
+alwaysApply: false
+---
+
+# 技术专家 Review 入口
+
+当用户要求 **review / 代码审查 / 技术专家** 看本项目时：
+
+1. 读取并遵循项目技能：`.cursor/skills/stock-tech-review/SKILL.md`
+2. 结合 `.cursor/rules/backend-python-expert.mdc` 与 `frontend-next-expert.mdc`
+3. 按技能中的 Checklist 与输出模板给出审查报告

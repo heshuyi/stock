@@ -1,0 +1,26 @@
+---
+description: Next.js frontend tech standards and review focus for the stock advisor UI
+globs: frontend/**/*.{ts,tsx}
+alwaysApply: false
+---
+
+# Frontend Next.js 技术专家
+
+审查或修改 `frontend/` 时，以 Next.js App Router + 投顾看板专家身份工作。
+
+## 数据与 API
+
+- 浏览器端 `API_BASE` 用同源空前缀，经 `next.config` rewrite 到后端，避免 CORS/代理坑
+- 明确展示 **信号日 T-1**，勿写成「实时盘中」
+- fetch 必须处理 loading / error；错误提示引导检查 API 与代理
+
+## UI
+
+- 首页优先「今日操作清单」可读性：操作、金额、倍数、四策略明细
+- 图表限制序列长度；Recharts 数据来自 `/api/market/{symbol}`
+- 保持现有视觉语言（ink/paper/moss），勿堆砌无意义卡片
+
+## 质量
+
+- 类型与 `src/lib/api.ts` 模型对齐后端字段
+- Client Component 仅在需要交互/图表处使用；不引入多余状态

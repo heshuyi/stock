@@ -1,0 +1,12 @@
+---
+description: Invoke Docker expert for container/compose reviews
+alwaysApply: false
+---
+
+# Docker 专家 Review 入口
+
+当用户要求 **Docker 专家 / compose 审查 / 容器问题** 时：
+
+1. 读取并遵循 `.cursor/skills/stock-docker-expert/SKILL.md`
+2. 结合 `.cursor/rules/docker-expert.mdc`
+3. 先确认本机 `docker` / `docker compose` 是否可用，再审配置文件

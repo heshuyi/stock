@@ -1,0 +1,86 @@
+services:
+  mongo:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      MONGODB_URI: mongodb://mongo:27017
+      MONGODB_DB: stock_advisor
+      CONFIG_PATH: /app/configs/symbols.json
+      MARKET_DB_PATH: /app/data/market.db
+      USE_MOCK_DATA: "false"
+      CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+    volumes:
+      - ./configs:/app/configs:ro
+      - market_data:/app/data
+    depends_on:
+      mongo:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./backend
+    environment:
+      MONGODB_URI: mongodb://mongo:27017
+      MONGODB_DB: stock_advisor
+      CONFIG_PATH: /app/configs/symbols.json
+      MARKET_DB_PATH: /app/data/market.db
+      USE_MOCK_DATA: "false"
+      SYNC_INTERVAL_SECONDS: "3600"
+    volumes:
+      - ./configs:/app/configs:ro
+      - market_data:/app/data
+    depends_on:
+      mongo:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    command: python -m app.worker
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./frontend
+      args:
+        API_URL: http://api:8000
+    ports:
+      - "3000:3000"
+    environment:
+      # runtime hint only; rewrite is baked at build via API_URL build-arg
+      API_URL: http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  mongo_data:
+  market_data:
