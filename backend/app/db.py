@@ -6,6 +6,7 @@ from typing import Any
 
 from app.config import get_settings
 from app.models import AppConfig, Portfolio, UserSettings
+from app.services.user_state import load_user_state, save_user_state
 
 _client: Any = None
 
@@ -49,6 +50,22 @@ async def ensure_indexes() -> None:
     await db.symbols.create_index([("id", 1)], unique=True)
 
 
+def _default_settings(cfg: AppConfig) -> UserSettings:
+    return UserSettings(
+        base_amount=cfg.defaults.base_amount,
+        hard_veto_enabled=cfg.defaults.hard_veto_enabled,
+        normalize_buy_cap=cfg.defaults.normalize_buy_cap,
+        ma_short=cfg.defaults.ma_short,
+        ma_long=cfg.defaults.ma_long,
+        buy_frequency=cfg.defaults.buy_frequency,
+        profit_take_enabled=cfg.defaults.profit_take_enabled,
+        profit_take_return=cfg.defaults.profit_take_return,
+        valuation_reduce_percentile=cfg.defaults.valuation_reduce_percentile,
+        valuation_exit_percentile=cfg.defaults.valuation_exit_percentile,
+        target_weights={s.id: s.target_weight for s in cfg.symbols},
+    )
+
+
 async def seed_symbols_and_settings() -> None:
     db = get_db()
     cfg = load_app_config()
@@ -58,28 +75,61 @@ async def seed_symbols_and_settings() -> None:
             {"$set": sym.model_dump()},
             upsert=True,
         )
+
+    # Restore disk snapshot first (critical for MONGODB_URI=memory restarts).
+    disk = load_user_state() or {}
+    disk_settings = disk.get("settings")
+    disk_portfolio = disk.get("portfolio")
+
     existing = await db.settings.find_one({"_id": "default"})
-    if not existing:
-        defaults = UserSettings(
-            base_amount=cfg.defaults.base_amount,
-            hard_veto_enabled=cfg.defaults.hard_veto_enabled,
-            normalize_buy_cap=cfg.defaults.normalize_buy_cap,
-            ma_short=cfg.defaults.ma_short,
-            ma_long=cfg.defaults.ma_long,
-            buy_frequency=cfg.defaults.buy_frequency,
-            profit_take_enabled=cfg.defaults.profit_take_enabled,
-            profit_take_return=cfg.defaults.profit_take_return,
-            valuation_reduce_percentile=cfg.defaults.valuation_reduce_percentile,
-            valuation_exit_percentile=cfg.defaults.valuation_exit_percentile,
-            target_weights={s.id: s.target_weight for s in cfg.symbols},
-        )
+    if disk_settings:
+        try:
+            restored = UserSettings.model_validate(disk_settings)
+            await db.settings.update_one(
+                {"_id": "default"},
+                {"$set": restored.model_dump()},
+                upsert=True,
+            )
+        except Exception:
+            if not existing:
+                defaults = _default_settings(cfg)
+                await db.settings.insert_one(
+                    {"_id": "default", **defaults.model_dump()}
+                )
+    elif not existing:
+        defaults = _default_settings(cfg)
         await db.settings.insert_one(
             {"_id": "default", **defaults.model_dump()}
         )
+
     portfolio = await db.portfolio.find_one({"_id": "default"})
-    if not portfolio:
+    if disk_portfolio:
+        try:
+            restored_p = Portfolio.model_validate(disk_portfolio)
+            await db.portfolio.update_one(
+                {"_id": "default"},
+                {"$set": restored_p.model_dump()},
+                upsert=True,
+            )
+        except Exception:
+            if not portfolio:
+                await db.portfolio.insert_one(
+                    {"_id": "default", **Portfolio().model_dump()}
+                )
+    elif not portfolio:
         await db.portfolio.insert_one(
             {"_id": "default", **Portfolio().model_dump()}
+        )
+
+    # Ensure a disk file exists after first boot with current mongo docs.
+    settings_doc = await db.settings.find_one({"_id": "default"})
+    portfolio_doc = await db.portfolio.find_one({"_id": "default"})
+    if settings_doc and portfolio_doc and not load_user_state():
+        settings_doc.pop("_id", None)
+        portfolio_doc.pop("_id", None)
+        save_user_state(
+            settings=UserSettings.model_validate(settings_doc),
+            portfolio=Portfolio.model_validate(portfolio_doc),
         )
 
 
@@ -88,17 +138,7 @@ async def get_user_settings() -> UserSettings:
     doc = await db.settings.find_one({"_id": "default"})
     if not doc:
         cfg = load_app_config()
-        return UserSettings(
-            base_amount=cfg.defaults.base_amount,
-            hard_veto_enabled=cfg.defaults.hard_veto_enabled,
-            normalize_buy_cap=cfg.defaults.normalize_buy_cap,
-            buy_frequency=cfg.defaults.buy_frequency,
-            profit_take_enabled=cfg.defaults.profit_take_enabled,
-            profit_take_return=cfg.defaults.profit_take_return,
-            valuation_reduce_percentile=cfg.defaults.valuation_reduce_percentile,
-            valuation_exit_percentile=cfg.defaults.valuation_exit_percentile,
-            target_weights={s.id: s.target_weight for s in cfg.symbols},
-        )
+        return _default_settings(cfg)
     doc.pop("_id", None)
     cfg = load_app_config()
     weights = dict(doc.get("target_weights") or {})
@@ -111,10 +151,19 @@ async def get_user_settings() -> UserSettings:
     # 30% each. Apply that complete allocation once for pre-KCB50 settings.
     if "KCB50" not in weights:
         weights = {symbol.id: symbol.target_weight for symbol in cfg.symbols}
+    # v2 allocation: HS300 35% / ZZ500 25% (from prior 30/30).
+    if (
+        abs(float(weights.get("HS300", 0.0)) - 0.3) < 1e-9
+        and abs(float(weights.get("ZZ500", 0.0)) - 0.3) < 1e-9
+    ):
+        weights = {symbol.id: symbol.target_weight for symbol in cfg.symbols}
     doc["target_weights"] = {
         symbol.id: float(weights.get(symbol.id, symbol.target_weight))
         for symbol in cfg.symbols
     }
+    # Buys are daily; migrate any leftover weekly preference.
+    if doc.get("buy_frequency") == "weekly":
+        doc["buy_frequency"] = "daily"
     return UserSettings.model_validate(doc)
 
 
@@ -125,6 +174,7 @@ async def save_user_settings(settings: UserSettings) -> UserSettings:
         {"$set": settings.model_dump()},
         upsert=True,
     )
+    save_user_state(settings=settings)
     return settings
 
 
@@ -144,4 +194,5 @@ async def save_portfolio(portfolio: Portfolio) -> Portfolio:
         {"$set": portfolio.model_dump()},
         upsert=True,
     )
+    save_user_state(portfolio=portfolio)
     return portfolio

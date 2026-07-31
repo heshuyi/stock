@@ -4,7 +4,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "A股宽基定投投顾看板",
-  description: "A股宽基每周估值定投、趋势过滤与分批止盈",
+  description: "A股宽基分角色差异化定投、空头排列过滤与追踪止盈",
 };
 
 const nav = [
@@ -39,7 +39,7 @@ export default function RootLayout({
               宽基定投投顾
             </p>
             <p className="mt-2 max-w-2xl text-base text-ink/70">
-              沪深300 / 中证500 / 创业板200 / 科创50 / 上证50 · 每周定投 · 每日止盈检查
+              沪深300 / 中证500 / 创业板200 / 科创50 / 上证50 · 分角色定投 · 硬否决可暂停
             </p>
             <nav className="mt-6 flex flex-wrap gap-2 border-b border-ink/10 pb-4">
               {nav.map((item) => (

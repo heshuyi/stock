@@ -32,6 +32,9 @@ export default function SettingsPage() {
               cost_price: 0,
               market_value: null,
               take_profit_stage: 0,
+              trend_state: null,
+              trailing_armed: false,
+              trail_peak_price: null,
             }
           );
         });
@@ -47,7 +50,7 @@ export default function SettingsPage() {
     try {
       await api.saveSettings(settings);
       await api.savePortfolio(portfolio);
-      setMessage("已保存设置与持仓");
+      setMessage("已保存设置与持仓（写入本地 user_state.json，重启后仍保留）");
     } catch (e) {
       setError(e instanceof Error ? e.message : "保存失败");
     }
@@ -70,7 +73,7 @@ export default function SettingsPage() {
     <main>
       <h1 className="font-display text-3xl text-ink">持仓与设置</h1>
       <p className="mt-1 text-sm text-ink/60">
-        修改月定投基准额、目标分配比例与当前持仓
+        修改月定投基准额、可支配储备、目标分配比例与当前持仓
       </p>
 
       <section className="mt-8 rounded-xl border border-ink/10 bg-white/70 p-5">
@@ -89,6 +92,23 @@ export default function SettingsPage() {
                 })
               }
             />
+          </label>
+          <label className="block text-sm">
+            <span className="text-ink/60">可支配定投储备（元）</span>
+            <input
+              type="number"
+              className="mt-1 w-full rounded-md border border-ink/15 bg-paper/50 px-3 py-2"
+              value={portfolio.cash}
+              onChange={(e) =>
+                setPortfolio({
+                  ...portfolio,
+                  cash: Number(e.target.value),
+                })
+              }
+            />
+            <span className="mt-1 block text-xs text-ink/45">
+              用于 36 个月弹药深度调节；填 0 表示不启用现金池缩放
+            </span>
           </label>
           <label className="block text-sm">
             <span className="text-ink/60">买入预算上限倍数</span>
@@ -147,7 +167,7 @@ export default function SettingsPage() {
                 })
               }
             />
-            启用硬否决（估值高估或趋势破位时强制暂停买入）
+            启用硬否决（估值 pause；成长仓空头排列时暂停，超跌可解封）
           </label>
           <label className="flex items-center gap-2 text-sm sm:col-span-2">
             <input
@@ -160,61 +180,11 @@ export default function SettingsPage() {
                 })
               }
             />
-            启用估值与持仓收益双止盈
+            启用估值武装 + 追踪回撤止盈（分标的阈值）
           </label>
-          <label className="block text-sm">
-            <span className="text-ink/60">收益率止盈线</span>
-            <input
-              type="number"
-              step="0.01"
-              min={0}
-              max={2}
-              value={settings.profit_take_return}
-              onChange={(e) =>
-                setSettings({
-                  ...settings,
-                  profit_take_return: Number(e.target.value),
-                })
-              }
-              className="mt-1 w-full rounded-md border border-ink/15 bg-paper/50 px-3 py-2"
-            />
-          </label>
-          <label className="block text-sm">
-            <span className="text-ink/60">第一档 PE 分位</span>
-            <input
-              type="number"
-              step="0.01"
-              min={0}
-              max={1}
-              value={settings.valuation_reduce_percentile}
-              onChange={(e) =>
-                setSettings({
-                  ...settings,
-                  valuation_reduce_percentile: Number(e.target.value),
-                })
-              }
-              className="mt-1 w-full rounded-md border border-ink/15 bg-paper/50 px-3 py-2"
-            />
-          </label>
-          <label className="block text-sm">
-            <span className="text-ink/60">清仓 PE 分位</span>
-            <input
-              type="number"
-              step="0.01"
-              min={0}
-              max={1}
-              value={settings.valuation_exit_percentile}
-              onChange={(e) =>
-                setSettings({
-                  ...settings,
-                  valuation_exit_percentile: Number(e.target.value),
-                })
-              }
-              className="mt-1 w-full rounded-md border border-ink/15 bg-paper/50 px-3 py-2"
-            />
-          </label>
-          <p className="self-end pb-2 text-xs text-ink/50">
-            买入频率：每周首个交易日；止盈信号每日检查。
+          <p className="text-xs text-ink/50 sm:col-span-2">
+            买入每日可执行。核心仓破位软降频；成长仓空头排列硬停，极端低估可 0.25×
+            解封。止盈按各宽基估值武装线与峰值回撤触发，不再用账户收益率硬止盈。
           </p>
         </div>
 

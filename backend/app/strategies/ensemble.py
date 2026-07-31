@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from app.models import EnsembleResult, StrategySignal
+from app.models import EnsembleResult, StrategyProfile, StrategySignal
 
 
 STRATEGY_WEIGHTS = {
-    "valuation": 0.6,
-    "trend": 0.4,
+    "valuation": 0.7,
+    "trend": 0.3,
 }
 
 
@@ -23,9 +23,12 @@ def ensemble(
     base_amount: float,
     hard_veto_enabled: bool = True,
     weights: dict[str, float] | None = None,
+    profile: StrategyProfile | None = None,
+    max_mult: float = 2.0,
 ) -> EnsembleResult:
-    """Weighted valuation/trend merge with hard-veto protection."""
-    wmap = weights or STRATEGY_WEIGHTS
+    """Weighted valuation/trend merge with role-aware hard-veto / unlock."""
+    profile = profile or StrategyProfile()
+    wmap = weights or profile.strategy_weights or STRATEGY_WEIGHTS
     by_name = {s.strategy: s for s in signals}
 
     valuation = by_name.get("valuation")
@@ -36,20 +39,25 @@ def ensemble(
     valuation_pause = bool(valuation and valuation.action == "pause")
     valuation_missing = bool(valuation and valuation.meta.get("data_missing"))
     trend_break = bool(trend and trend.meta.get("trend_break"))
+    oversold_unlock = bool(trend and trend.meta.get("oversold_unlock"))
+
     if hard_veto_enabled:
-        if valuation_missing:
+        if valuation_missing and valuation:
             hard_veto = True
             veto_reasons.append(valuation.reason)
-        elif valuation_pause and trend_break:
+        if valuation_pause and valuation and valuation.reason not in veto_reasons:
             hard_veto = True
             veto_reasons.append(valuation.reason)
-            if trend:
-                veto_reasons.append(trend.reason)
-        # profitable trend-break reduce still blocks new buys
-        if trend and trend.action == "reduce" and trend.multiplier <= 0:
+        # Trend hard veto only when profile opts in and unlock did not fire.
+        if (
+            profile.trend_hard_veto
+            and trend_break
+            and not oversold_unlock
+            and trend
+            and trend.reason not in veto_reasons
+        ):
             hard_veto = True
-            if trend.reason not in veto_reasons:
-                veto_reasons.append(trend.reason)
+            veto_reasons.append(trend.reason)
 
     reduce_ratios = [
         s.reduce_ratio for s in signals if s.reduce_ratio is not None
@@ -57,7 +65,11 @@ def ensemble(
     max_reduce = max(reduce_ratios) if reduce_ratios else None
     any_reduce = any(s.action == "reduce" for s in signals)
 
-    if hard_veto:
+    if oversold_unlock and not hard_veto and trend:
+        action = "buy"
+        final_mult = float(profile.oversold_mult)
+        reason = trend.reason
+    elif hard_veto:
         action = "reduce" if any_reduce and max_reduce else "pause"
         final_mult = 0.0
         reason = "硬否决：" + "；".join(veto_reasons)
@@ -70,7 +82,7 @@ def ensemble(
                 continue
             numer += w * s.multiplier
             denom += w
-        final_mult = _clip(numer / denom if denom else 0.0, 0.0, 2.0)
+        final_mult = _clip(numer / denom if denom else 0.0, 0.0, max_mult)
 
         if any_reduce and max_reduce:
             action = "reduce"
@@ -80,7 +92,9 @@ def ensemble(
             )
         elif final_mult <= 1e-9:
             action = "pause" if trend_break else "hold"
-            reason = "趋势破位，暂停新增" if trend_break else "合成倍数接近 0，观望"
+            reason = (
+                "趋势空头排列，暂停新增" if trend_break else "合成倍数接近 0，观望"
+            )
         else:
             action = "buy"
             parts = [
@@ -111,6 +125,39 @@ def ensemble(
     )
 
 
+def cash_pool_factor(
+    cash: float,
+    base_amount: float,
+    reserve_months: int = 36,
+) -> float:
+    """Scale factor from dry-powder depth; cash<=0 means 'not tracked' → 1.0."""
+    if cash <= 0 or base_amount <= 0 or reserve_months <= 0:
+        return 1.0
+    target = base_amount * reserve_months
+    return _clip(cash / target, 0.35, 1.25)
+
+
+def apply_cash_pool(
+    items: list[EnsembleResult],
+    pool_factor: float,
+) -> tuple[list[EnsembleResult], bool]:
+    """Scale buy amounts by cash-pool factor; extra cut when pool is thin."""
+    if abs(pool_factor - 1.0) < 1e-9:
+        return items, False
+    scale = pool_factor * 0.8 if pool_factor < 0.5 else pool_factor
+    adjusted: list[EnsembleResult] = []
+    changed = False
+    for item in items:
+        data = item.model_dump()
+        if item.action == "buy" and item.amount > 0:
+            data["amount"] = round(item.amount * scale, 2)
+            data["multiplier"] = round(item.multiplier * scale, 4)
+            data["reason"] = item.reason + f"（现金池调节 ×{scale:.2f}）"
+            changed = True
+        adjusted.append(EnsembleResult.model_validate(data))
+    return adjusted, changed
+
+
 def normalize_amounts(
     items: list[EnsembleResult],
     base_amount: float,
@@ -139,10 +186,7 @@ def ensure_minimum_investment(
     floor_ratio: float = 0.25,
     preferred_symbols: tuple[str, ...] = ("HS300", "ZZ500"),
 ) -> tuple[list[EnsembleResult], bool]:
-    """Keep a small DCA floor when every symbol is paused.
-
-    This preserves long-term accumulation discipline for broad indices.
-    """
+    """Keep a small DCA floor when every symbol is paused."""
     if not items or floor_ratio <= 0:
         return items, False
     total = sum(item.amount for item in items if item.amount > 0)
@@ -161,9 +205,15 @@ def ensure_minimum_investment(
     for item in items:
         data = item.model_dump()
         if item.symbol in target_ids:
-            alloc_weight = item.target_weight / weight_sum if weight_sum else 1.0 / len(targets)
+            alloc_weight = (
+                item.target_weight / weight_sum
+                if weight_sum
+                else 1.0 / len(targets)
+            )
             amount = round(floor_total * alloc_weight, 2)
-            multiplier = round(amount / max(base_amount * item.target_weight, 1e-9), 4)
+            multiplier = round(
+                amount / max(base_amount * item.target_weight, 1e-9), 4
+            )
             data["action"] = "buy"
             data["amount"] = amount
             data["multiplier"] = multiplier

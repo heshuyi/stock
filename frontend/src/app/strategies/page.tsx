@@ -63,8 +63,10 @@ export default function StrategiesPage() {
     <main>
       <h1 className="font-display text-3xl text-ink">策略对比</h1>
       <p className="mt-1 text-sm text-ink/60">
-        估值 60% + 趋势 40%；创业板200和科创50使用对应板块市场代理估值；止盈信号优先于买入
+        分角色差异化：核心估值70%/趋势30%，成长55%/45%；代理标的用 PE+PB
+        复合；止盈为估值追踪回撤
         {data ? ` · 信号日期（T-1） ${data.date}` : ""}
+        {data?.pool_factor != null ? ` · 现金池×${data.pool_factor.toFixed(2)}` : ""}
       </p>
 
       {loading && !data && (

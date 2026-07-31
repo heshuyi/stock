@@ -6,7 +6,11 @@ import pandas as pd
 
 from app.models import SymbolConfig
 from app.services import market_store
-from app.services.market_data import enrich_indicators, fetch_akshare_valuations
+from app.services.market_data import (
+    apply_valuation_asof,
+    enrich_indicators,
+    fetch_akshare_valuations,
+)
 
 
 def test_missing_valuation_is_not_backfilled_from_future():
@@ -129,3 +133,106 @@ def test_star_50_market_proxy_accepts_star_market_pe_schema():
 
     assert pe is not None and pe["pe"].tolist() == [108.0, 110.1]
     assert pb is not None and pb["pb"].tolist() == [7.9, 8.0]
+
+
+def test_monthly_proxy_pe_fills_daily_bars_with_asof():
+    bars = pd.DataFrame(
+        {
+            "date": pd.to_datetime(
+                ["2023-11-15", "2023-11-20", "2023-11-30", "2023-12-01"]
+            ).date,
+            "close": [1, 2, 3, 4],
+        }
+    )
+    pe = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2023-10-31", "2023-11-30"]).date,
+            "pe": [40.0, 42.0],
+        }
+    )
+    result = apply_valuation_asof(bars, pe, None)
+    assert result["pe"].tolist() == [40.0, 40.0, 42.0, 42.0]
+    assert result["pe"].isna().sum() == 0
+
+
+def test_full_window_percentile_uses_older_history():
+    from app.services.market_data import FULL_VALUATION_WINDOW_DAYS
+
+    bars = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2026-07-01", "2026-07-30"]).date,
+            "close": [1, 2],
+            "pe": [30.0, 30.0],
+            "pb": [3.0, 3.0],
+        }
+    )
+    # History older than 5y should still count under full window.
+    pe_history = pd.DataFrame(
+        {
+            "date": pd.to_datetime(
+                ["2018-01-31", "2019-01-31", "2020-01-31", "2024-01-31", "2026-07-30"]
+            ).date,
+            "pe": [10.0, 12.0, 15.0, 20.0, 30.0],
+        }
+    )
+    five_y = enrich_indicators(
+        bars, ma_short=2, ma_long=2, pe_history=pe_history, valuation_window_days=5 * 252
+    )
+    full = enrich_indicators(
+        bars,
+        ma_short=2,
+        ma_long=2,
+        pe_history=pe_history,
+        valuation_window_days=FULL_VALUATION_WINDOW_DAYS,
+    )
+    assert full.iloc[-1]["pe_percentile"] >= five_y.iloc[-1]["pe_percentile"]
+
+
+def test_proxy_percentile_uses_prelisting_history():
+    bars = pd.DataFrame(
+        {
+            "date": pd.to_datetime(
+                [
+                    "2023-07-31",
+                    "2023-11-30",
+                    "2024-11-30",
+                    "2025-11-30",
+                    "2026-07-30",
+                ]
+            ).date,
+            "close": [1, 2, 3, 4, 5],
+            "pe": [55.0, 50.0, 45.0, 42.0, 41.0],
+            "pb": [4.2, 4.0, 3.8, 3.5, 3.4],
+        }
+    )
+    # Long monthly history inside the rolling 5y window, mostly below 41.
+    pe_history = pd.DataFrame(
+        {
+            "date": pd.date_range("2021-08-31", periods=55, freq="ME").date,
+            "pe": [25 + i * 0.1 for i in range(55)],
+        }
+    )
+    short_only = enrich_indicators(bars, ma_short=2, ma_long=3)
+    with_history = enrich_indicators(
+        bars, ma_short=2, ma_long=3, pe_history=pe_history, pb_history=None
+    )
+    # Short window sees 41 as the lowest of 5 points; long history ranks it high.
+    assert short_only.iloc[-1]["pe_percentile"] == 0.2
+    assert with_history.iloc[-1]["pe_percentile"] > 0.95
+
+
+def test_purge_removes_retired_cyb_symbol(monkeypatch, tmp_path):
+    db_path = tmp_path / "market.db"
+    monkeypatch.setattr(market_store, "get_db_path", lambda: db_path)
+    market_store.upsert_records(
+        "CYB",
+        [{"date": "2026-01-05", "close": 3000, "pe": None, "pb": None}],
+    )
+    market_store.upsert_records(
+        "CYB200",
+        [{"date": "2026-01-05", "close": 4000, "pe": 41.0, "pb": 4.0}],
+    )
+    removed = market_store.purge_symbols_not_in({"CYB200", "HS300"})
+    assert any(item["symbol"] == "CYB" for item in removed)
+    assert market_store.get_bar("CYB", "2026-01-05") is None
+    assert market_store.get_bar("CYB200", "2026-01-05") is not None

@@ -14,7 +14,15 @@ from app.models import SymbolConfig
 from app.services import market_store
 
 VALUATION_WINDOW_DAYS = 5 * 252
+FULL_VALUATION_WINDOW_DAYS = 100 * 365
 FREE_VALUATION_SYMBOLS = {"HS300", "ZZ500", "CYB200", "KCB50", "SZ50"}
+
+
+def valuation_window_days_for(symbol: SymbolConfig) -> int:
+    window = getattr(symbol.strategy_profile, "percentile_window", "5y")
+    if window == "full":
+        return FULL_VALUATION_WINDOW_DAYS
+    return VALUATION_WINDOW_DAYS
 
 
 def generate_mock_history(symbol: SymbolConfig, days: int = 800) -> pd.DataFrame:
@@ -178,8 +186,77 @@ def fetch_akshare_valuations(
     return pe_df, pb_df
 
 
-def fetch_akshare_index(symbol: SymbolConfig) -> pd.DataFrame | None:
-    """Fetch live index OHLCV + PE/PB history from akshare."""
+def apply_valuation_asof(
+    df: pd.DataFrame,
+    pe_df: pd.DataFrame | None,
+    pb_df: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """Attach PE/PB with backward as-of fill so monthly proxies cover daily bars."""
+    out = df.sort_values("date").copy()
+    out["_dt"] = pd.to_datetime(out["date"])
+
+    def _asof_col(source: pd.DataFrame | None, col: str) -> pd.Series:
+        if source is None or source.empty or col not in source.columns:
+            return pd.Series(np.nan, index=out.index)
+        hist = source.dropna(subset=[col]).sort_values("date").copy()
+        if hist.empty:
+            return pd.Series(np.nan, index=out.index)
+        hist["_dt"] = pd.to_datetime(hist["date"])
+        merged = pd.merge_asof(
+            out[["_dt"]],
+            hist[["_dt", col]],
+            on="_dt",
+            direction="backward",
+        )
+        return merged[col]
+
+    out["pe"] = _asof_col(pe_df, "pe")
+    out["pb"] = _asof_col(pb_df, "pb")
+    return out.drop(columns=["_dt"])
+
+
+def _percentile_against_history(
+    dates: list[Any],
+    values: np.ndarray,
+    history: pd.DataFrame | None,
+    value_col: str,
+    window_days: int = VALUATION_WINDOW_DAYS,
+) -> list[float]:
+    """Rank each value against the provider history ending on that date."""
+    if history is None or history.empty or value_col not in history.columns:
+        return [float("nan")] * len(values)
+
+    hist = history.dropna(subset=[value_col]).sort_values("date").copy()
+    if hist.empty:
+        return [float("nan")] * len(values)
+
+    hist_dates = pd.to_datetime(hist["date"]).to_numpy(dtype="datetime64[ns]")
+    hist_vals = hist[value_col].to_numpy(dtype=float)
+    out: list[float] = []
+    window = np.timedelta64(window_days, "D")
+    for raw_date, value in zip(dates, values):
+        if value is None or (isinstance(value, float) and np.isnan(value)):
+            out.append(float("nan"))
+            continue
+        end = np.datetime64(pd.Timestamp(raw_date).to_datetime64())
+        start = end - window
+        mask = (hist_dates >= start) & (hist_dates <= end)
+        window_vals = hist_vals[mask]
+        if len(window_vals) < 5:
+            out.append(0.5)
+        else:
+            out.append(float((window_vals <= float(value)).mean()))
+    return out
+
+
+def fetch_akshare_index(
+    symbol: SymbolConfig,
+) -> tuple[pd.DataFrame, pd.DataFrame | None, pd.DataFrame | None] | None:
+    """Fetch live index OHLCV + PE/PB history from akshare.
+
+    Returns (bars, pe_history, pb_history). History frames keep the full
+    provider series so proxy percentiles can use pre-listing observations.
+    """
     try:
         import akshare as ak
 
@@ -220,33 +297,23 @@ def fetch_akshare_index(symbol: SymbolConfig) -> pd.DataFrame | None:
         # Index valuation is preferred. A broad-market proxy is only used when
         # the symbol explicitly opts in and remains labelled as proxy data.
         pe_df, pb_df = fetch_akshare_valuations(ak, symbol)
-
-        if pe_df is not None:
-            df = df.merge(pe_df, on="date", how="left")
-        else:
-            df["pe"] = np.nan
-        if pb_df is not None:
-            df = df.merge(pb_df, on="date", how="left")
-        else:
-            df["pb"] = np.nan
-
-        if df["pe"].notna().sum() >= 20:
-            # Do not back-fill pre-valuation history with future observations.
-            df["pe"] = df["pe"].ffill()
-        else:
-            df["pe"] = np.nan
-        if df["pb"].notna().sum() >= 20:
-            df["pb"] = df["pb"].ffill()
-        else:
-            df["pb"] = np.nan
-
-        return df[["date", "open", "high", "low", "close", "volume", "pe", "pb"]]
+        df = apply_valuation_asof(df, pe_df, pb_df)
+        return (
+            df[["date", "open", "high", "low", "close", "volume", "pe", "pb"]],
+            pe_df,
+            pb_df,
+        )
     except Exception:
         return None
 
 
 def enrich_indicators(
-    df: pd.DataFrame, ma_short: int = 60, ma_long: int = 120
+    df: pd.DataFrame,
+    ma_short: int = 60,
+    ma_long: int = 120,
+    pe_history: pd.DataFrame | None = None,
+    pb_history: pd.DataFrame | None = None,
+    valuation_window_days: int = VALUATION_WINDOW_DAYS,
 ) -> pd.DataFrame:
     out = df.copy()
     out["ma_short"] = out["close"].rolling(
@@ -259,9 +326,18 @@ def enrich_indicators(
     out["high_1y"] = rolling_high
     out["drawdown"] = (rolling_high - out["close"]) / rolling_high
 
-    window = min(len(out), VALUATION_WINDOW_DAYS)
-    for col, out_col in (("pe", "pe_percentile"), ("pb", "pb_percentile")):
-        arr = out[col].to_numpy(dtype=float)
+    dates = out["date"].tolist()
+    if pe_history is not None and not pe_history.empty:
+        out["pe_percentile"] = _percentile_against_history(
+            dates,
+            out["pe"].to_numpy(dtype=float),
+            pe_history,
+            "pe",
+            window_days=valuation_window_days,
+        )
+    else:
+        window = min(len(out), valuation_window_days)
+        arr = out["pe"].to_numpy(dtype=float)
         vals = []
         for i in range(len(arr)):
             if np.isnan(arr[i]):
@@ -274,7 +350,32 @@ def enrich_indicators(
                 vals.append(0.5)
             else:
                 vals.append(float((hist <= hist[-1]).mean()))
-        out[out_col] = vals
+        out["pe_percentile"] = vals
+
+    if pb_history is not None and not pb_history.empty:
+        out["pb_percentile"] = _percentile_against_history(
+            dates,
+            out["pb"].to_numpy(dtype=float),
+            pb_history,
+            "pb",
+            window_days=valuation_window_days,
+        )
+    else:
+        window = min(len(out), valuation_window_days)
+        arr = out["pb"].to_numpy(dtype=float)
+        vals = []
+        for i in range(len(arr)):
+            if np.isnan(arr[i]):
+                vals.append(np.nan)
+                continue
+            start = max(0, i - window + 1)
+            hist = arr[start : i + 1]
+            hist = hist[~np.isnan(hist)]
+            if len(hist) < 5:
+                vals.append(0.5)
+            else:
+                vals.append(float((hist <= hist[-1]).mean()))
+        out["pb_percentile"] = vals
     return out
 
 
@@ -405,10 +506,12 @@ def _sync_symbol_cpu(
     ma_long: int,
 ) -> tuple[list[dict[str, Any]], str, str | None]:
     """CPU/network heavy sync work — run in a worker thread."""
+    pe_history = pb_history = None
     if not force_mock:
-        df = fetch_akshare_index(symbol)
-        if df is None:
+        fetched = fetch_akshare_index(symbol)
+        if fetched is None:
             raise RuntimeError(f"实时行情拉取失败: {symbol.id} ({symbol.name})")
+        df, pe_history, pb_history = fetched
         source = "akshare"
         valuation_source = (
             (
@@ -417,7 +520,10 @@ def _sync_symbol_cpu(
                 else "akshare-legulegu"
             )
             if symbol.id in FREE_VALUATION_SYMBOLS
-            and ("pe" in df.columns and df["pe"].notna().sum() >= 20)
+            and (
+                (pe_history is not None and pe_history["pe"].notna().sum() >= 20)
+                or ("pe" in df.columns and df["pe"].notna().sum() >= 20)
+            )
             else None
         )
 
@@ -426,8 +532,12 @@ def _sync_symbol_cpu(
         if symbol.id in FREE_VALUATION_SYMBOLS and valuation_source is None:
             legacy = load_legacy_free_valuations(symbol)
             if legacy is not None:
-                df = df.drop(columns=["pe", "pb"], errors="ignore").merge(
-                    legacy, on="date", how="left"
+                pe_history = legacy[["date", "pe"]].dropna() if "pe" in legacy else None
+                pb_history = legacy[["date", "pb"]].dropna() if "pb" in legacy else None
+                df = apply_valuation_asof(
+                    df.drop(columns=["pe", "pb"], errors="ignore"),
+                    pe_history,
+                    pb_history,
                 )
                 valuation_source = "legacy-akshare-legulegu"
 
@@ -438,25 +548,55 @@ def _sync_symbol_cpu(
         df = generate_mock_history(symbol, days=520)
         source = "mock"
         valuation_source = "mock"
+        pe_history = df[["date", "pe"]].dropna()
+        pb_history = df[["date", "pb"]].dropna()
 
-    df = enrich_indicators(df, ma_short, ma_long)
+    df = enrich_indicators(
+        df,
+        ma_short,
+        ma_long,
+        pe_history=pe_history,
+        pb_history=pb_history,
+        valuation_window_days=valuation_window_days_for(symbol),
+    )
     records = df_to_records(symbol.id, df, source)
     market_store.upsert_records(symbol.id, records)
     if valuation_source:
+        source_symbol = (
+            symbol.valuation_proxy_label or f"{symbol.pe_symbol}市场代理"
+            if symbol.valuation_proxy
+            else symbol.index_code
+        )
+        quality = (
+            "proxy"
+            if symbol.valuation_proxy
+            else "verified" if source != "mock" else "synthetic"
+        )
+        # Persist the full provider history (including pre-listing months)
+        # so proxy percentiles remain auditable.
+        history_records: list[dict[str, Any]] = []
+        pe_map: dict[str, float | None] = {}
+        pb_map: dict[str, float | None] = {}
+        if pe_history is not None and not pe_history.empty:
+            for _, row in pe_history.iterrows():
+                value = _f(row.get("pe"))
+                if value is not None:
+                    pe_map[str(row["date"])] = value
+        if pb_history is not None and not pb_history.empty:
+            for _, row in pb_history.iterrows():
+                value = _f(row.get("pb"))
+                if value is not None:
+                    pb_map[str(row["date"])] = value
+        for key in sorted(set(pe_map) | set(pb_map)):
+            history_records.append(
+                {"date": key, "pe": pe_map.get(key), "pb": pb_map.get(key)}
+            )
         market_store.upsert_valuation_observations(
             symbol.id,
-            records,
+            history_records or records,
             source=valuation_source,
-            source_symbol=(
-                symbol.valuation_proxy_label or f"{symbol.pe_symbol}市场代理"
-                if symbol.valuation_proxy
-                else symbol.index_code
-            ),
-            quality_status=(
-                "proxy"
-                if symbol.valuation_proxy
-                else "verified" if source != "mock" else "synthetic"
-            ),
+            source_symbol=source_symbol,
+            quality_status=quality,
         )
         market_store.materialize_valuation_metrics(symbol.id, records)
     market_store.ensure_month_plan(symbol.id, start_ym="1991-01")
@@ -504,6 +644,7 @@ async def sync_all(use_mock: bool | None = None) -> dict[str, Any]:
     cfg = load_app_config()
     settings = get_settings()
     force_mock = settings.use_mock_data if use_mock is None else use_mock
+    purged = market_store.purge_symbols_not_in({s.id for s in cfg.symbols})
     results = []
     warning = None
     for sym in cfg.symbols:
@@ -534,6 +675,7 @@ async def sync_all(use_mock: bool | None = None) -> dict[str, Any]:
     return {
         "synced_at": datetime.utcnow().isoformat() + "Z",
         "results": results,
+        "purged": purged,
         "warning": warning,
         "live": all(r["source"] == "akshare" for r in results),
         "data_status": market_store.data_status(),

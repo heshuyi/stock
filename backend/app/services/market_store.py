@@ -116,6 +116,46 @@ def connect() -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+def delete_symbol(symbol: str) -> dict[str, int]:
+    """Remove a retired symbol's warehouse rows (bars, valuations, plans)."""
+    ensure_store()
+    with connect() as conn:
+        bars = conn.execute(
+            "DELETE FROM market_bars WHERE symbol=?", (symbol,)
+        ).rowcount
+        vals = conn.execute(
+            "DELETE FROM valuation_observations WHERE symbol=?", (symbol,)
+        ).rowcount
+        months = conn.execute(
+            "DELETE FROM backfill_months WHERE symbol=?", (symbol,)
+        ).rowcount
+        conn.execute("DELETE FROM sync_meta WHERE symbol=?", (symbol,))
+    return {
+        "bars": int(bars or 0),
+        "valuations": int(vals or 0),
+        "months": int(months or 0),
+    }
+
+
+def purge_symbols_not_in(active_ids: set[str] | list[str]) -> list[dict[str, Any]]:
+    """Drop warehouse symbols that are no longer in the live config."""
+    active = set(active_ids)
+    ensure_store()
+    with connect() as conn:
+        existing = [
+            row[0]
+            for row in conn.execute(
+                "SELECT DISTINCT symbol FROM market_bars"
+            ).fetchall()
+        ]
+    removed: list[dict[str, Any]] = []
+    for symbol in existing:
+        if symbol not in active:
+            stats = delete_symbol(symbol)
+            removed.append({"symbol": symbol, **stats})
+    return removed
+
+
 def upsert_records(symbol: str, records: list[dict[str, Any]]) -> int:
     if not records:
         return 0

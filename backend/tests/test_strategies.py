@@ -1,10 +1,10 @@
-"""Unit tests for strategy ensemble boundaries and T-1 clamp."""
+"""Unit tests for differentiated strategy profiles and ensemble boundaries."""
 
-from datetime import date
-
-from app.models import StrategySignal
-from app.services.engine import _clamp_signal_date, _is_weekly_execution_day
+from app.models import StrategyProfile, StrategySignal, TrendMults
+from app.services.engine import _clamp_signal_date
 from app.strategies.ensemble import (
+    apply_cash_pool,
+    cash_pool_factor,
     ensemble,
     ensure_minimum_investment,
     normalize_amounts,
@@ -16,88 +16,192 @@ from app.strategies.trend import trend_signal
 from app.strategies.valuation import valuation_signal
 
 
+CORE = StrategyProfile(
+    valuation_mode="pe",
+    pause_percentile=0.90,
+    tier_mults=[1.8, 1.4, 1.0, 0.5],
+    trend_hard_veto=False,
+    trend_hysteresis=True,
+    trend_mults=TrendMults(bull=1.0, mild_bull=0.85, sandwich=0.55, bear=0.35),
+    strategy_weights={"valuation": 0.7, "trend": 0.3},
+    trail_arm_percentile=0.90,
+    trail_drawdown=0.10,
+    trail_exit_percentile=0.95,
+)
+
+GROWTH = StrategyProfile(
+    valuation_mode="pe_pb_composite",
+    pe_weight=0.55,
+    pb_weight=0.45,
+    pause_percentile=0.80,
+    tier_mults=[1.6, 1.3, 1.0, 0.4],
+    trend_hard_veto=True,
+    trend_hysteresis=False,
+    trend_mults=TrendMults(bull=1.0, mild_bull=0.7, sandwich=0.35, bear=0.0),
+    oversold_unlock=True,
+    oversold_p=0.15,
+    oversold_bias=-0.12,
+    oversold_mult=0.25,
+    strategy_weights={"valuation": 0.55, "trend": 0.45},
+    trail_arm_percentile=0.80,
+    trail_drawdown=0.08,
+    trail_exit_percentile=0.90,
+)
+
+
 def test_valuation_pause_high():
-    s = valuation_signal("HS300", 0.9, 0.85)
+    s = valuation_signal("HS300", 0.95, 0.85, profile=CORE)
     assert s.action == "pause"
     assert s.multiplier == 0
 
 
-def test_valuation_undervalued():
-    s = valuation_signal("HS300", 0.1, 0.15)
+def test_valuation_core_allows_high_but_below_pause():
+    s = valuation_signal("HS300", 0.85, 0.85, profile=CORE)
     assert s.action == "buy"
-    assert s.multiplier == 2.0
+    assert s.multiplier == 0.5
+
+
+def test_valuation_undervalued():
+    s = valuation_signal("HS300", 0.1, 0.15, profile=CORE)
+    assert s.action == "buy"
+    assert s.multiplier == 1.8
 
 
 def test_valuation_missing_does_not_assume_neutral():
-    s = valuation_signal("CYB200", None, None)
+    s = valuation_signal("CYB200", None, None, profile=GROWTH)
     assert s.action == "pause"
     assert s.multiplier == 0
     assert s.meta["data_missing"] is True
 
 
-def test_valuation_uses_pe_percentile_tiers():
-    s = valuation_signal("CYB200", 0.3, None, pe=38)
+def test_valuation_composite_uses_pe_pb_weights():
+    s = valuation_signal("CYB200", 0.2, 0.8, pe=30, pb=4, profile=GROWTH)
+    expected = 0.55 * 0.2 + 0.45 * 0.8
+    assert abs(s.meta["p"] - expected) < 1e-9
     assert s.action == "buy"
-    assert s.multiplier == 1.5
 
 
 def test_valuation_marks_market_proxy_in_signal():
     s = valuation_signal(
-        "CYB200", 0.3, 0.4, pe=38, proxy_label="创业板市场代理估值"
+        "CYB200",
+        0.3,
+        0.4,
+        pe=38,
+        proxy_label="创业板市场代理估值",
+        profile=GROWTH,
     )
     assert "创业板市场代理估值" in s.reason
     assert s.meta["proxy_label"] == "创业板市场代理估值"
 
 
-def test_trend_breakdown():
-    s = trend_signal("HS300", price=90, ma_short=100, ma_long=110)
+def test_trend_bear_alignment():
+    s = trend_signal("CYB200", price=90, ma_short=95, ma_long=110, profile=GROWTH)
+    assert s.meta["trend_state"] == "bear"
     assert s.action == "pause"
-    assert s.multiplier == 0
+    assert s.meta["trend_break"] is True
+
+
+def test_trend_sandwich_not_hard_break():
+    s = trend_signal(
+        "CYB200", price=90, ma_short=120, ma_long=110, profile=GROWTH
+    )
+    assert s.meta["trend_state"] == "sandwich"
+    assert s.meta["trend_break"] is False
+    assert s.multiplier == 0.35
+
+
+def test_trend_core_bear_still_buys():
+    s = trend_signal("HS300", price=90, ma_short=95, ma_long=110, profile=CORE)
+    assert s.meta["trend_state"] == "bear"
+    assert s.action == "buy"
+    assert s.multiplier == 0.35
+    assert s.meta["trend_break"] is False
+
+
+def test_trend_hysteresis_holds_mild_bull_near_ma():
+    # Bias just below 0 but within -1% band → stay mild_bull
+    s = trend_signal(
+        "HS300",
+        price=99.5,
+        ma_short=100,
+        ma_long=100,
+        profile=CORE,
+        prev_state="mild_bull",
+    )
+    assert s.meta["raw_state"] == "sandwich"
+    assert s.meta["trend_state"] == "mild_bull"
 
 
 def test_trend_bull():
-    s = trend_signal("HS300", price=120, ma_short=110, ma_long=100)
+    s = trend_signal("HS300", price=120, ma_short=110, ma_long=100, profile=CORE)
     assert s.multiplier == 1.0
 
 
-def test_profit_taking_first_stage_by_return():
+def test_oversold_unlock():
+    s = trend_signal(
+        "CYB200",
+        price=80,
+        ma_short=90,
+        ma_long=100,
+        profile=GROWTH,
+        valuation_p=0.10,
+    )
+    assert s.meta["oversold_unlock"] is True
+    assert s.action == "buy"
+    assert s.multiplier == 0.25
+    assert s.meta["trend_break"] is False
+
+
+def test_profit_taking_trailing_drawdown():
     s = profit_taking_signal(
-        "HS300", pe_percentile=0.5, profit_ratio=0.31,
-        has_position=True, current_stage=0
+        "HS300",
+        valuation_p=0.92,
+        price=90,
+        has_position=True,
+        current_stage=0,
+        trailing_armed=True,
+        trail_peak_price=100,
+        profile=CORE,
     )
     assert s.action == "reduce"
     assert s.reduce_ratio == 0.5
     assert s.meta["recommended_stage"] == 1
 
 
-def test_profit_taking_full_exit_by_valuation():
+def test_profit_taking_exit_by_valuation():
     s = profit_taking_signal(
-        "HS300", pe_percentile=0.91, profit_ratio=0.1,
-        has_position=True, current_stage=1
+        "HS300",
+        valuation_p=0.96,
+        price=100,
+        has_position=True,
+        current_stage=1,
+        profile=CORE,
     )
     assert s.action == "reduce"
     assert s.reduce_ratio == 1.0
     assert s.meta["recommended_stage"] == 2
 
 
-def test_profit_taking_requires_a_position():
+def test_profit_taking_ignores_return_trigger():
     s = profit_taking_signal(
-        "HS300", pe_percentile=0.95, profit_ratio=None, has_position=False
+        "HS300",
+        valuation_p=0.5,
+        price=100,
+        has_position=True,
+        current_stage=0,
+        profit_ratio=0.5,
+        profile=CORE,
     )
     assert s.action == "hold"
     assert s.reduce_ratio is None
 
 
-def test_profit_taking_can_ignore_disabled_valuation():
+def test_profit_taking_requires_a_position():
     s = profit_taking_signal(
-        "X",
-        pe_percentile=0.95,
-        profit_ratio=0.1,
-        has_position=True,
-        current_stage=0,
-        valuation_enabled=False,
+        "HS300", valuation_p=0.95, price=100, has_position=False, profile=CORE
     )
     assert s.action == "hold"
+    assert s.reduce_ratio is None
 
 
 def test_rebalance_underweight():
@@ -110,34 +214,10 @@ def test_grid_deep_drawdown():
     assert s.multiplier == 1.6
 
 
-def test_hard_veto_blocks_grid():
+def test_hard_veto_growth_bear_blocks_buy():
     signals = [
-        valuation_signal("HS300", 0.9, 0.9),
-        trend_signal("HS300", 90, 100, 110),
-        rebalance_signal("HS300", None, 0.4),
-        grid_signal("HS300", 0.35),
-    ]
-    result = ensemble(
-        symbol="HS300",
-        name="沪深300",
-        etf_code="510300",
-        target_weight=0.4,
-        signals=signals,
-        base_amount=10000,
-        hard_veto_enabled=True,
-    )
-    assert result.hard_veto is True
-    assert result.multiplier == 0
-    assert result.action == "pause"
-    assert result.amount == 0
-
-
-def test_missing_valuation_blocks_new_buy():
-    signals = [
-        valuation_signal("CYB200", None, None),
-        trend_signal("CYB200", 120, 110, 100),
-        rebalance_signal("CYB200", None, 0.15),
-        grid_signal("CYB200", 0.25),
+        valuation_signal("CYB200", 0.3, 0.4, profile=GROWTH),
+        trend_signal("CYB200", 90, 95, 110, profile=GROWTH, valuation_p=0.3),
     ]
     result = ensemble(
         symbol="CYB200",
@@ -147,6 +227,72 @@ def test_missing_valuation_blocks_new_buy():
         signals=signals,
         base_amount=10000,
         hard_veto_enabled=True,
+        profile=GROWTH,
+        weights=GROWTH.strategy_weights,
+    )
+    assert result.hard_veto is True
+    assert result.amount == 0
+    assert result.action == "pause"
+
+
+def test_core_bear_not_hard_veto():
+    signals = [
+        valuation_signal("HS300", 0.5, 0.5, profile=CORE),
+        trend_signal("HS300", 90, 95, 110, profile=CORE),
+    ]
+    result = ensemble(
+        symbol="HS300",
+        name="沪深300",
+        etf_code="510300",
+        target_weight=0.35,
+        signals=signals,
+        base_amount=10000,
+        hard_veto_enabled=True,
+        profile=CORE,
+        weights=CORE.strategy_weights,
+    )
+    assert result.hard_veto is False
+    assert result.action == "buy"
+    assert result.amount > 0
+
+
+def test_oversold_unlock_bypasses_hard_veto():
+    signals = [
+        valuation_signal("CYB200", 0.1, 0.1, profile=GROWTH),
+        trend_signal(
+            "CYB200", 80, 90, 100, profile=GROWTH, valuation_p=0.1
+        ),
+    ]
+    result = ensemble(
+        symbol="CYB200",
+        name="创业板200",
+        etf_code="159572",
+        target_weight=0.15,
+        signals=signals,
+        base_amount=10000,
+        hard_veto_enabled=True,
+        profile=GROWTH,
+        weights=GROWTH.strategy_weights,
+    )
+    assert result.hard_veto is False
+    assert result.action == "buy"
+    assert abs(result.multiplier - 0.25) < 1e-9
+
+
+def test_missing_valuation_blocks_new_buy():
+    signals = [
+        valuation_signal("CYB200", None, None, profile=GROWTH),
+        trend_signal("CYB200", 120, 110, 100, profile=GROWTH),
+    ]
+    result = ensemble(
+        symbol="CYB200",
+        name="创业板200",
+        etf_code="159572",
+        target_weight=0.15,
+        signals=signals,
+        base_amount=10000,
+        hard_veto_enabled=True,
+        profile=GROWTH,
     )
     assert result.hard_veto is True
     assert result.action == "pause"
@@ -155,8 +301,12 @@ def test_missing_valuation_blocks_new_buy():
 
 def test_valuation_trend_weighted_average():
     signals = [
-        StrategySignal(strategy="valuation", symbol="X", action="buy", multiplier=1.0, reason="a"),
-        StrategySignal(strategy="trend", symbol="X", action="buy", multiplier=0.5, reason="b"),
+        StrategySignal(
+            strategy="valuation", symbol="X", action="buy", multiplier=1.0, reason="a"
+        ),
+        StrategySignal(
+            strategy="trend", symbol="X", action="buy", multiplier=0.5, reason="b"
+        ),
     ]
     result = ensemble(
         symbol="X",
@@ -165,9 +315,35 @@ def test_valuation_trend_weighted_average():
         target_weight=0.4,
         signals=signals,
         base_amount=10000,
+        weights={"valuation": 0.6, "trend": 0.4},
     )
     assert abs(result.multiplier - 0.8) < 1e-6
     assert abs(result.amount - 3200) < 1e-6
+
+
+def test_cash_pool_factor_and_scale():
+    assert cash_pool_factor(0, 10000, 36) == 1.0
+    assert abs(cash_pool_factor(360000, 10000, 36) - 1.0) < 1e-9
+    thin = cash_pool_factor(50000, 10000, 36)
+    assert thin < 0.5
+    from app.models import EnsembleResult
+
+    items = [
+        EnsembleResult(
+            symbol="A",
+            name="A",
+            etf_code="1",
+            target_weight=0.5,
+            action="buy",
+            multiplier=1,
+            amount=1000,
+            reason="r",
+            strategies=[],
+        )
+    ]
+    scaled, applied = apply_cash_pool(items, 0.4)
+    assert applied is True
+    assert scaled[0].amount == 320.0  # 0.4 * 0.8 extra cut
 
 
 def test_normalize_cap():
@@ -220,15 +396,6 @@ def test_clamp_signal_date_rejects_future(monkeypatch):
     assert mode3 == "T-1"
 
 
-def test_weekly_execution_uses_first_trading_day():
-    assert _is_weekly_execution_day(
-        "2026-07-24", execution_day=date(2026, 7, 27)
-    )
-    assert not _is_weekly_execution_day(
-        "2026-07-27", execution_day=date(2026, 7, 28)
-    )
-
-
 def test_minimum_investment_floor():
     from app.models import EnsembleResult
 
@@ -249,7 +416,7 @@ def test_minimum_investment_floor():
             symbol="ZZ500",
             name="中证500",
             etf_code="510500",
-            target_weight=0.35,
+            target_weight=0.25,
             action="pause",
             multiplier=0,
             amount=0,

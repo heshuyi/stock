@@ -32,6 +32,7 @@ export interface Dashboard {
   normalized: boolean;
   items: EnsembleItem[];
   warning?: string | null;
+  pool_factor?: number | null;
   disclaimer: string;
 }
 
@@ -53,6 +54,9 @@ export interface Holding {
   cost_price: number;
   market_value?: number | null;
   take_profit_stage: number;
+  trend_state?: "bull" | "mild_bull" | "sandwich" | "bear" | null;
+  trailing_armed?: boolean;
+  trail_peak_price?: number | null;
 }
 
 export interface Portfolio {
@@ -67,7 +71,7 @@ export interface UserSettings {
   target_weights?: Record<string, number> | null;
   ma_short: number;
   ma_long: number;
-  buy_frequency: "weekly";
+  buy_frequency: "daily" | "weekly";
   profit_take_enabled: boolean;
   profit_take_return: number;
   valuation_reduce_percentile: number;
