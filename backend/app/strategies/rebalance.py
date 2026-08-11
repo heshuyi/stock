@@ -8,7 +8,11 @@ def rebalance_signal(
     current_weight: float | None,
     target_weight: float,
 ) -> StrategySignal:
-    """Fixed amount + drift vs target weight."""
+    """Fixed amount + drift vs target weight.
+
+Legacy module — v3 ensemble does NOT call this (see PRD §7 非目标).
+Kept for unit tests and optional future experiments.
+"""
     if current_weight is None:
         return StrategySignal(
             strategy="rebalance",

@@ -182,6 +182,32 @@ def test_profit_taking_exit_by_valuation():
     assert s.meta["recommended_stage"] == 2
 
 
+def test_profit_taking_global_settings_override_profile():
+    """Engine overlays user settings onto symbol profile for arm/exit lines."""
+    profile = CORE.model_copy(
+        update={
+            "trail_arm_percentile": 0.90,
+            "trail_exit_percentile": 0.95,
+        }
+    )
+    from_settings = profile.model_copy(
+        update={
+            "trail_arm_percentile": 0.75,
+            "trail_exit_percentile": 0.85,
+        }
+    )
+    s = profit_taking_signal(
+        "HS300",
+        valuation_p=0.86,
+        price=100,
+        has_position=True,
+        current_stage=0,
+        profile=from_settings,
+    )
+    assert s.action == "reduce"
+    assert s.reduce_ratio == 1.0
+
+
 def test_profit_taking_ignores_return_trigger():
     s = profit_taking_signal(
         "HS300",

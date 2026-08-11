@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
-from datetime import date, datetime
+import logging
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +18,34 @@ from app.services import market_store
 VALUATION_WINDOW_DAYS = 5 * 252
 FULL_VALUATION_WINDOW_DAYS = 100 * 365
 FREE_VALUATION_SYMBOLS = {"HS300", "ZZ500", "CYB200", "KCB50", "SZ50"}
+SYNC_CONCURRENCY = 3
+# Bars kept from warehouse when appending new sessions (MA120 + 1y drawdown).
+INCREMENTAL_LOOKBACK_BARS = 320
+
+logger = logging.getLogger(__name__)
+
+
+def warehouse_is_fresh(symbol_id: str, *, force: bool = False) -> dict[str, Any] | None:
+    """If warehouse already covers expected calendar T-1, return skip context.
+
+    Compare against expected_trading_t1 (weekday), NOT warehouse max(date) —
+    otherwise a stale tip always looks "fresh" and sync never catches up.
+    """
+    if force:
+        return None
+    expected = market_store.expected_trading_t1().isoformat()
+    latest = market_store.get_latest_bar(symbol_id)
+    if not latest:
+        return None
+    if str(latest.get("date") or "") < expected:
+        return None
+    if latest.get("close") is None or latest.get("ma_long") is None:
+        return None
+    return {
+        "signal_date": expected,
+        "latest": latest,
+        "rows": market_store.count_bars(symbol_id),
+    }
 
 
 def valuation_window_days_for(symbol: SymbolConfig) -> int:
@@ -110,8 +140,14 @@ def load_legacy_free_valuations(symbol: SymbolConfig) -> pd.DataFrame | None:
         return None
 
 
-def fetch_akshare_etf_history(symbol: SymbolConfig) -> pd.DataFrame | None:
-    """Fetch unadjusted ETF closes for cost-basis and take-profit calculations."""
+def fetch_akshare_etf_history(
+    symbol: SymbolConfig,
+    *,
+    start_date: str | None = None,
+) -> pd.DataFrame | None:
+    """Fetch unadjusted ETF closes; start_date=YYYYMMDD for incremental range."""
+    start = start_date or "19900101"
+    end = date.today().strftime("%Y%m%d")
     frame = None
     try:
         import akshare as ak
@@ -119,8 +155,8 @@ def fetch_akshare_etf_history(symbol: SymbolConfig) -> pd.DataFrame | None:
         frame = ak.fund_etf_hist_em(
             symbol=symbol.etf_code,
             period="daily",
-            start_date="19900101",
-            end_date=date.today().strftime("%Y%m%d"),
+            start_date=start,
+            end_date=end,
             adjust="",
         )
     except Exception:
@@ -143,7 +179,11 @@ def fetch_akshare_etf_history(symbol: SymbolConfig) -> pd.DataFrame | None:
         return None
     frame["date"] = pd.to_datetime(frame["date"]).dt.date
     frame["etf_close"] = pd.to_numeric(frame["etf_close"], errors="coerce")
-    return frame[["date", "etf_close"]].dropna().sort_values("date")
+    out = frame[["date", "etf_close"]].dropna().sort_values("date")
+    if start_date:
+        cut = datetime.strptime(start_date, "%Y%m%d").date()
+        out = out[out["date"] >= cut]
+    return out
 
 
 def fetch_akshare_valuations(
@@ -249,61 +289,97 @@ def _percentile_against_history(
     return out
 
 
+def _normalize_index_frame(df: pd.DataFrame) -> pd.DataFrame | None:
+    colmap = {
+        "date": "date",
+        "日期": "date",
+        "open": "open",
+        "开盘": "open",
+        "high": "high",
+        "最高": "high",
+        "low": "low",
+        "最低": "low",
+        "close": "close",
+        "收盘": "close",
+        "volume": "volume",
+        "成交量": "volume",
+    }
+    rename = {c: colmap[c] for c in df.columns if c in colmap}
+    df = df.rename(columns=rename)
+    needed = ["date", "open", "high", "low", "close"]
+    if not all(c in df.columns for c in needed):
+        return None
+    df["date"] = pd.to_datetime(df["date"]).dt.date
+    if "volume" not in df.columns:
+        df["volume"] = 0
+    return df.sort_values("date").reset_index(drop=True)
+
+
 def fetch_akshare_index(
     symbol: SymbolConfig,
+    *,
+    start_date: str | None = None,
+    with_valuation: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame | None, pd.DataFrame | None] | None:
-    """Fetch live index OHLCV + PE/PB history from akshare.
+    """Fetch index OHLCV (+ optional PE/PB). start_date=YYYYMMDD for incremental.
 
-    Returns (bars, pe_history, pb_history). History frames keep the full
-    provider series so proxy percentiles can use pre-listing observations.
+    Prefer ranged `index_zh_a_hist` when start_date is set so we do not pull
+    the entire history on every sync.
     """
     try:
         import akshare as ak
 
-        df = ak.stock_zh_index_daily(symbol=symbol.akshare_symbol)
+        end = date.today().strftime("%Y%m%d")
+        df = None
+        if start_date:
+            try:
+                df = ak.index_zh_a_hist(
+                    symbol=symbol.index_code,
+                    period="daily",
+                    start_date=start_date,
+                    end_date=end,
+                )
+            except Exception:
+                df = None
         if df is None or df.empty:
-            df = ak.index_zh_a_hist(
-                symbol=symbol.index_code, period="daily", start_date="19910101"
-            )
+            df = ak.stock_zh_index_daily(symbol=symbol.akshare_symbol)
+            if df is None or df.empty:
+                df = ak.index_zh_a_hist(
+                    symbol=symbol.index_code,
+                    period="daily",
+                    start_date=start_date or "19910101",
+                    end_date=end,
+                )
         if df is None or df.empty:
             return None
 
-        colmap = {
-            "date": "date",
-            "日期": "date",
-            "open": "open",
-            "开盘": "open",
-            "high": "high",
-            "最高": "high",
-            "low": "low",
-            "最低": "low",
-            "close": "close",
-            "收盘": "close",
-            "volume": "volume",
-            "成交量": "volume",
-        }
-        rename = {c: colmap[c] for c in df.columns if c in colmap}
-        df = df.rename(columns=rename)
-        needed = ["date", "open", "high", "low", "close"]
-        if not all(c in df.columns for c in needed):
+        df = _normalize_index_frame(df)
+        if df is None or df.empty:
             return None
-        df["date"] = pd.to_datetime(df["date"]).dt.date
-        if "volume" not in df.columns:
-            df["volume"] = 0
-        # Keep the complete real series returned by the provider. Each index
-        # naturally starts at its own inception/base date; no synthetic splice.
-        df = df.sort_values("date").reset_index(drop=True)
+        if start_date:
+            cut = datetime.strptime(start_date, "%Y%m%d").date()
+            df = df[df["date"] >= cut].reset_index(drop=True)
+            if df.empty:
+                return (
+                    df,
+                    None,
+                    None,
+                )
 
-        # Index valuation is preferred. A broad-market proxy is only used when
-        # the symbol explicitly opts in and remains labelled as proxy data.
-        pe_df, pb_df = fetch_akshare_valuations(ak, symbol)
-        df = apply_valuation_asof(df, pe_df, pb_df)
+        pe_df = pb_df = None
+        if with_valuation:
+            pe_df, pb_df = fetch_akshare_valuations(ak, symbol)
+            df = apply_valuation_asof(df, pe_df, pb_df)
+        else:
+            df["pe"] = np.nan
+            df["pb"] = np.nan
         return (
             df[["date", "open", "high", "low", "close", "volume", "pe", "pb"]],
             pe_df,
             pb_df,
         )
     except Exception:
+        logger.exception("fetch_akshare_index failed for %s", symbol.id)
         return None
 
 
@@ -499,57 +575,266 @@ async def warm_latest_snapshots(migrate_legacy: bool = False) -> int:
     return loaded
 
 
+def _pe_pb_frames_from_store(symbol_id: str) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+    rows = market_store.load_valuation_series(symbol_id)
+    if not rows:
+        return None, None
+    frame = pd.DataFrame(rows)
+    frame["date"] = pd.to_datetime(frame["date"]).dt.date
+    pe_df = frame.dropna(subset=["pe"])[["date", "pe"]] if "pe" in frame else None
+    pb_df = frame.dropna(subset=["pb"])[["date", "pb"]] if "pb" in frame else None
+    if pe_df is not None and pe_df.empty:
+        pe_df = None
+    if pb_df is not None and pb_df.empty:
+        pb_df = None
+    return pe_df, pb_df
+
+
+def _persist_valuations(
+    symbol: SymbolConfig,
+    *,
+    pe_history: pd.DataFrame | None,
+    pb_history: pd.DataFrame | None,
+    records: list[dict[str, Any]],
+    valuation_source: str | None,
+    source: str,
+) -> None:
+    if not valuation_source:
+        return
+    source_symbol = (
+        symbol.valuation_proxy_label or f"{symbol.pe_symbol}市场代理"
+        if symbol.valuation_proxy
+        else symbol.index_code
+    )
+    quality = (
+        "proxy"
+        if symbol.valuation_proxy
+        else "verified" if source != "mock" else "synthetic"
+    )
+    history_records: list[dict[str, Any]] = []
+    pe_map: dict[str, float | None] = {}
+    pb_map: dict[str, float | None] = {}
+    if pe_history is not None and not pe_history.empty:
+        for _, row in pe_history.iterrows():
+            value = _f(row.get("pe"))
+            if value is not None:
+                pe_map[str(row["date"])] = value
+    if pb_history is not None and not pb_history.empty:
+        for _, row in pb_history.iterrows():
+            value = _f(row.get("pb"))
+            if value is not None:
+                pb_map[str(row["date"])] = value
+    for key in sorted(set(pe_map) | set(pb_map)):
+        history_records.append(
+            {"date": key, "pe": pe_map.get(key), "pb": pb_map.get(key)}
+        )
+    market_store.upsert_valuation_observations(
+        symbol.id,
+        history_records or records,
+        source=valuation_source,
+        source_symbol=source_symbol,
+        quality_status=quality,
+    )
+    market_store.materialize_valuation_metrics(symbol.id, records)
+
+
 def _sync_symbol_cpu(
     symbol: SymbolConfig,
     force_mock: bool,
     ma_short: int,
     ma_long: int,
-) -> tuple[list[dict[str, Any]], str, str | None]:
-    """CPU/network heavy sync work — run in a worker thread."""
+    *,
+    force_full: bool = False,
+) -> tuple[list[dict[str, Any]], str, str | None, str]:
+    """CPU/network sync. Returns (records_upserted, source, valuation_source, mode).
+
+    mode:
+      - full: empty warehouse or force_full
+      - incremental: only fetch/write bars after warehouse latest
+      - skipped: already at T-1 (no network)
+    """
     pe_history = pb_history = None
-    if not force_mock:
-        fetched = fetch_akshare_index(symbol)
-        if fetched is None:
-            raise RuntimeError(f"实时行情拉取失败: {symbol.id} ({symbol.name})")
-        df, pe_history, pb_history = fetched
-        source = "akshare"
-        valuation_source = (
-            (
-                "akshare-legulegu-market-proxy"
-                if symbol.valuation_proxy
-                else "akshare-legulegu"
-            )
-            if symbol.id in FREE_VALUATION_SYMBOLS
-            and (
-                (pe_history is not None and pe_history["pe"].notna().sum() >= 20)
-                or ("pe" in df.columns and df["pe"].notna().sum() >= 20)
-            )
-            else None
-        )
+    mode = "full"
 
-        # The free LG endpoint is intermittent. Bootstrap from previously
-        # verified observations instead of replacing valuation history with NULL.
-        if symbol.id in FREE_VALUATION_SYMBOLS and valuation_source is None:
-            legacy = load_legacy_free_valuations(symbol)
-            if legacy is not None:
-                pe_history = legacy[["date", "pe"]].dropna() if "pe" in legacy else None
-                pb_history = legacy[["date", "pb"]].dropna() if "pb" in legacy else None
-                df = apply_valuation_asof(
-                    df.drop(columns=["pe", "pb"], errors="ignore"),
-                    pe_history,
-                    pb_history,
-                )
-                valuation_source = "legacy-akshare-legulegu"
-
-        etf = fetch_akshare_etf_history(symbol)
-        if etf is not None:
-            df = df.merge(etf, on="date", how="left")
-    else:
+    if force_mock:
         df = generate_mock_history(symbol, days=520)
         source = "mock"
         valuation_source = "mock"
         pe_history = df[["date", "pe"]].dropna()
         pb_history = df[["date", "pb"]].dropna()
+        df = enrich_indicators(
+            df,
+            ma_short,
+            ma_long,
+            pe_history=pe_history,
+            pb_history=pb_history,
+            valuation_window_days=valuation_window_days_for(symbol),
+        )
+        records = df_to_records(symbol.id, df, source)
+        market_store.upsert_records(symbol.id, records)
+        _persist_valuations(
+            symbol,
+            pe_history=pe_history,
+            pb_history=pb_history,
+            records=records,
+            valuation_source=valuation_source,
+            source=source,
+        )
+        market_store.ensure_month_plan(symbol.id, start_ym="1991-01")
+        return records, source, valuation_source, mode
+
+    latest = market_store.get_latest_bar(symbol.id)
+    expected_t1 = market_store.expected_trading_t1().isoformat()
+    bar_count = market_store.count_bars(symbol.id)
+    min_seed = max(ma_long + 40, 180)
+
+    if (
+        not force_full
+        and latest
+        and str(latest.get("date") or "") >= expected_t1
+        and latest.get("ma_long") is not None
+    ):
+        return [], latest.get("source") or "warehouse", None, "skipped"
+
+    use_incremental = (
+        not force_full
+        and latest is not None
+        and bar_count >= min_seed
+        and latest.get("date")
+    )
+
+    if use_incremental:
+        warehouse_latest = date.fromisoformat(str(latest["date"])[:10])
+        fetch_start = (warehouse_latest + timedelta(days=1)).strftime("%Y%m%d")
+        lookback_start = (
+            warehouse_latest - timedelta(days=INCREMENTAL_LOOKBACK_BARS * 2)
+        ).isoformat()
+
+        # Price only — PE/PB come from warehouse (no full valuation re-pull).
+        fetched = fetch_akshare_index(
+            symbol, start_date=fetch_start, with_valuation=False
+        )
+        local_rows = market_store.load_records_since(symbol.id, lookback_start)
+        local_df = pd.DataFrame(local_rows)
+
+        if fetched is not None and not local_df.empty:
+            new_df, _, _ = fetched
+            new_df = new_df[new_df["date"] > warehouse_latest].copy()
+            if new_df.empty:
+                # Provider has nothing newer than warehouse tip.
+                if str(latest.get("date") or "") >= expected_t1:
+                    return [], latest.get("source") or "warehouse", None, "skipped"
+                # Behind calendar T-1 but provider empty — fall through to full.
+            else:
+                local_df["date"] = pd.to_datetime(local_df["date"]).dt.date
+                for col in (
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                    "pe",
+                    "pb",
+                    "etf_close",
+                ):
+                    if col not in local_df.columns:
+                        local_df[col] = np.nan
+                local_part = local_df[
+                    ["date", "open", "high", "low", "close", "volume", "etf_close"]
+                ].copy()
+
+                etf = fetch_akshare_etf_history(symbol, start_date=fetch_start)
+                if etf is not None:
+                    new_df = new_df.merge(etf, on="date", how="left")
+                else:
+                    new_df["etf_close"] = np.nan
+
+                pe_history, pb_history = _pe_pb_frames_from_store(symbol.id)
+                source = "akshare"
+                valuation_source = None
+                if (
+                    symbol.id in FREE_VALUATION_SYMBOLS
+                    and pe_history is not None
+                    and pe_history["pe"].notna().sum() >= 20
+                ):
+                    valuation_source = (
+                        "warehouse-legulegu-market-proxy"
+                        if symbol.valuation_proxy
+                        else "warehouse-legulegu"
+                    )
+
+                for col in ("pe", "pb"):
+                    if col not in new_df.columns:
+                        new_df[col] = np.nan
+
+                combined = pd.concat([local_part, new_df], ignore_index=True, sort=False)
+                combined = combined.drop_duplicates(subset=["date"], keep="last")
+                combined = combined.sort_values("date").reset_index(drop=True)
+                if pe_history is not None or pb_history is not None:
+                    combined = apply_valuation_asof(
+                        combined.drop(columns=["pe", "pb"], errors="ignore"),
+                        pe_history,
+                        pb_history,
+                    )
+
+                combined = enrich_indicators(
+                    combined,
+                    ma_short,
+                    ma_long,
+                    pe_history=pe_history,
+                    pb_history=pb_history,
+                    valuation_window_days=valuation_window_days_for(symbol),
+                )
+                # Only write newly fetched sessions (缺几个加几个).
+                to_write = combined[combined["date"] > warehouse_latest]
+                records = df_to_records(symbol.id, to_write, source)
+                market_store.upsert_records(symbol.id, records)
+                # Do not rewrite full valuation history on incremental price sync.
+                if valuation_source:
+                    market_store.materialize_valuation_metrics(symbol.id, records)
+                logger.info(
+                    "incremental sync %s: +%d bars after %s",
+                    symbol.id,
+                    len(records),
+                    warehouse_latest,
+                )
+                return records, source, valuation_source, "incremental"
+
+    # Full path: first seed or force_full / incremental fallback
+    mode = "full"
+    fetched = fetch_akshare_index(symbol, start_date=None, with_valuation=True)
+    if fetched is None:
+        raise RuntimeError(f"实时行情拉取失败: {symbol.id} ({symbol.name})")
+    df, pe_history, pb_history = fetched
+    source = "akshare"
+    valuation_source = (
+        (
+            "akshare-legulegu-market-proxy"
+            if symbol.valuation_proxy
+            else "akshare-legulegu"
+        )
+        if symbol.id in FREE_VALUATION_SYMBOLS
+        and (
+            (pe_history is not None and pe_history["pe"].notna().sum() >= 20)
+            or ("pe" in df.columns and df["pe"].notna().sum() >= 20)
+        )
+        else None
+    )
+    if symbol.id in FREE_VALUATION_SYMBOLS and valuation_source is None:
+        legacy = load_legacy_free_valuations(symbol)
+        if legacy is not None:
+            pe_history = legacy[["date", "pe"]].dropna() if "pe" in legacy else None
+            pb_history = legacy[["date", "pb"]].dropna() if "pb" in legacy else None
+            df = apply_valuation_asof(
+                df.drop(columns=["pe", "pb"], errors="ignore"),
+                pe_history,
+                pb_history,
+            )
+            valuation_source = "legacy-akshare-legulegu"
+
+    etf = fetch_akshare_etf_history(symbol)
+    if etf is not None:
+        df = df.merge(etf, on="date", how="left")
 
     df = enrich_indicators(
         df,
@@ -561,56 +846,28 @@ def _sync_symbol_cpu(
     )
     records = df_to_records(symbol.id, df, source)
     market_store.upsert_records(symbol.id, records)
-    if valuation_source:
-        source_symbol = (
-            symbol.valuation_proxy_label or f"{symbol.pe_symbol}市场代理"
-            if symbol.valuation_proxy
-            else symbol.index_code
-        )
-        quality = (
-            "proxy"
-            if symbol.valuation_proxy
-            else "verified" if source != "mock" else "synthetic"
-        )
-        # Persist the full provider history (including pre-listing months)
-        # so proxy percentiles remain auditable.
-        history_records: list[dict[str, Any]] = []
-        pe_map: dict[str, float | None] = {}
-        pb_map: dict[str, float | None] = {}
-        if pe_history is not None and not pe_history.empty:
-            for _, row in pe_history.iterrows():
-                value = _f(row.get("pe"))
-                if value is not None:
-                    pe_map[str(row["date"])] = value
-        if pb_history is not None and not pb_history.empty:
-            for _, row in pb_history.iterrows():
-                value = _f(row.get("pb"))
-                if value is not None:
-                    pb_map[str(row["date"])] = value
-        for key in sorted(set(pe_map) | set(pb_map)):
-            history_records.append(
-                {"date": key, "pe": pe_map.get(key), "pb": pb_map.get(key)}
-            )
-        market_store.upsert_valuation_observations(
-            symbol.id,
-            history_records or records,
-            source=valuation_source,
-            source_symbol=source_symbol,
-            quality_status=quality,
-        )
-        market_store.materialize_valuation_metrics(symbol.id, records)
+    _persist_valuations(
+        symbol,
+        pe_history=pe_history,
+        pb_history=pb_history,
+        records=records,
+        valuation_source=valuation_source,
+        source=source,
+    )
     market_store.ensure_month_plan(symbol.id, start_ym="1991-01")
-    return records, source, valuation_source
+    return records, source, valuation_source, mode
 
 
-async def sync_symbol(symbol: SymbolConfig, use_mock: bool | None = None) -> dict[str, Any]:
-    import asyncio
-
+async def sync_symbol(
+    symbol: SymbolConfig,
+    use_mock: bool | None = None,
+    *,
+    force: bool = False,
+) -> dict[str, Any]:
     settings = get_settings()
     force_mock = settings.use_mock_data if use_mock is None else use_mock
     cfg = load_app_config()
 
-    # Prefer user settings MA if available (async mongo)
     from app.db import get_user_settings
 
     try:
@@ -621,63 +878,139 @@ async def sync_symbol(symbol: SymbolConfig, use_mock: bool | None = None) -> dic
         ma_short = cfg.defaults.ma_short
         ma_long = cfg.defaults.ma_long
 
-    records, source, valuation_source = await asyncio.to_thread(
-        _sync_symbol_cpu, symbol, force_mock, ma_short, ma_long
+    records, source, valuation_source, mode = await asyncio.to_thread(
+        _sync_symbol_cpu,
+        symbol,
+        force_mock,
+        ma_short,
+        ma_long,
+        force_full=force,
     )
+
+    if mode == "skipped":
+        latest = market_store.get_latest_bar(symbol.id) or {}
+        if latest:
+            await mirror_latest_to_mongo(symbol.id, latest)
+        logger.info(
+            "skip sync %s — warehouse fresh through %s",
+            symbol.id,
+            latest.get("date"),
+        )
+        return {
+            "symbol": symbol.id,
+            "source": source,
+            "valuation_source": valuation_source,
+            "mode": "skipped",
+            "rows_added": 0,
+            "rows": market_store.count_bars(symbol.id),
+            "latest_date": latest.get("date"),
+            "latest_close": latest.get("close"),
+            "stored_in": str(market_store.get_db_path()),
+            "ma_short": ma_short,
+            "ma_long": ma_long,
+        }
+
     if records:
         await mirror_latest_to_mongo(symbol.id, records[-1])
-
+    tip = market_store.get_latest_bar(symbol.id) or {}
     return {
         "symbol": symbol.id,
         "source": source,
         "valuation_source": valuation_source,
-        "rows": len(records),
-        "latest_date": records[-1]["date"] if records else None,
-        "latest_close": records[-1]["close"] if records else None,
+        "mode": mode,
+        "rows_added": len(records),
+        "rows": market_store.count_bars(symbol.id),
+        "latest_date": tip.get("date") or (records[-1]["date"] if records else None),
+        "latest_close": tip.get("close") or (records[-1]["close"] if records else None),
         "stored_in": str(market_store.get_db_path()),
         "ma_short": ma_short,
         "ma_long": ma_long,
     }
 
 
-async def sync_all(use_mock: bool | None = None) -> dict[str, Any]:
+async def sync_all(
+    use_mock: bool | None = None,
+    *,
+    force: bool = False,
+    concurrency: int = SYNC_CONCURRENCY,
+) -> dict[str, Any]:
     cfg = load_app_config()
     settings = get_settings()
     force_mock = settings.use_mock_data if use_mock is None else use_mock
     purged = market_store.purge_symbols_not_in({s.id for s in cfg.symbols})
-    results = []
+
+    sem = asyncio.Semaphore(max(1, int(concurrency)))
+
+    async def _one(sym: SymbolConfig) -> dict[str, Any]:
+        async with sem:
+            try:
+                return await sync_symbol(sym, use_mock=force_mock, force=force)
+            except Exception as exc:
+                logger.exception("sync failed for %s", sym.id)
+                return {
+                    "symbol": sym.id,
+                    "source": "error",
+                    "mode": "error",
+                    "valuation_source": None,
+                    "rows": 0,
+                    "latest_date": None,
+                    "latest_close": None,
+                    "error": str(exc),
+                    "stored_in": str(market_store.get_db_path()),
+                }
+
+    results = list(await asyncio.gather(*[_one(sym) for sym in cfg.symbols]))
+
     warning = None
-    for sym in cfg.symbols:
-        r = await sync_symbol(sym, use_mock=force_mock)
-        results.append(r)
-        if r["source"] == "mock":
-            warning = "部分或全部行情回退到 mock（akshare 拉取失败）"
     if force_mock:
         warning = "当前为 USE_MOCK_DATA=true，未使用实时行情"
+    elif any(r.get("source") == "error" for r in results):
+        failed = [r["symbol"] for r in results if r.get("source") == "error"]
+        warning = "同步失败：" + "、".join(failed)
+    elif any(r.get("source") == "mock" for r in results):
+        warning = "部分或全部行情回退到 mock（akshare 拉取失败）"
     else:
         valuation_required = {s.id for s in cfg.symbols if s.valuation_enabled}
         valuation_missing = [
             r["symbol"]
             for r in results
-            if r["symbol"] in valuation_required and not r.get("valuation_source")
+            if r["symbol"] in valuation_required
+            and r.get("mode") == "full"
+            and not r.get("valuation_source")
         ]
         if valuation_missing:
             warning = (
                 "以下指数免费估值源不可用，策略将安全暂停："
                 + "、".join(valuation_missing)
             )
-        elif all(r["source"] == "akshare" for r in results):
-            warning = None
-    if not force_mock and warning is None and all(
-        r["source"] == "akshare" for r in results
+
+    skipped = sum(1 for r in results if r.get("mode") == "skipped")
+    incremental = sum(1 for r in results if r.get("mode") == "incremental")
+    fetched = sum(1 for r in results if r.get("mode") in {"full", "incremental"})
+    rows_added = sum(int(r.get("rows_added") or 0) for r in results)
+    if warning is None and skipped and fetched == 0:
+        warning = f"行情仓已是最新（T-1），已跳过 {skipped} 个标的的网络拉取"
+    elif warning is None and incremental and not any(
+        r.get("mode") == "full" for r in results
     ):
-        warning = None
+        warning = f"增量同步：补齐 {rows_added} 根 K 线（{incremental} 个标的）"
+
+    live_ok = all(
+        r.get("source") in {"akshare", "warehouse"} or r.get("mode") == "skipped"
+        for r in results
+    ) and not any(r.get("source") == "error" for r in results)
+
     return {
         "synced_at": datetime.utcnow().isoformat() + "Z",
         "results": results,
         "purged": purged,
         "warning": warning,
-        "live": all(r["source"] == "akshare" for r in results),
+        "live": live_ok and not force_mock,
+        "skipped": skipped,
+        "incremental": incremental,
+        "fetched": fetched,
+        "rows_added": rows_added,
+        "force": force,
         "data_status": market_store.data_status(),
     }
 

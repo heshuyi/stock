@@ -1,0 +1,12 @@
+---
+description: Invoke stock mobile frontend expert for phone/tablet UX
+alwaysApply: false
+---
+
+# 移动端前端专家入口
+
+当用户要求 **移动端 / 手机适配 / responsive / 兼用移动端** 时：
+
+1. 读取并遵循项目技能：`.cursor/skills/stock-mobile-frontend/SKILL.md`
+2. 细项对照：`.cursor/skills/stock-mobile-frontend/checklist.md`
+3. 按 skill 工作流程审计并改 `frontend/src/**`，交付时用 skill 中的输出模板

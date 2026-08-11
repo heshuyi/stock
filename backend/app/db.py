@@ -144,21 +144,9 @@ async def get_user_settings() -> UserSettings:
     doc.pop("_id", None)
     cfg = load_app_config()
     weights = dict(doc.get("target_weights") or {})
-    # One-time compatibility for the CYB (399006) -> CYB200 (399019)
-    # replacement. Holdings are intentionally not migrated because they are
-    # different ETFs, but the user's allocation preference can carry over.
+    # CYB → CYB200 symbol rename: carry allocation forward only.
     if "CYB200" not in weights and "CYB" in weights:
         weights["CYB200"] = weights["CYB"]
-    # The user approved adding KCB50 at 10% and reducing HS300/ZZ500 to
-    # 30% each. Apply that complete allocation once for pre-KCB50 settings.
-    if "KCB50" not in weights:
-        weights = {symbol.id: symbol.target_weight for symbol in cfg.symbols}
-    # v2 allocation: HS300 35% / ZZ500 25% (from prior 30/30).
-    if (
-        abs(float(weights.get("HS300", 0.0)) - 0.3) < 1e-9
-        and abs(float(weights.get("ZZ500", 0.0)) - 0.3) < 1e-9
-    ):
-        weights = {symbol.id: symbol.target_weight for symbol in cfg.symbols}
     doc["target_weights"] = {
         symbol.id: float(weights.get(symbol.id, symbol.target_weight))
         for symbol in cfg.symbols

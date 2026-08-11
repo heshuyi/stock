@@ -2,7 +2,7 @@
   "symbols": [
     {
       "id": "HS300",
-      "name": "沪深300",
+      "name": "华泰柏瑞沪深300ETF",
       "etf_code": "510300",
       "index_code": "000300",
       "akshare_symbol": "sh000300",
@@ -34,7 +34,7 @@
     },
     {
       "id": "ZZ500",
-      "name": "中证500",
+      "name": "南方中证500ETF",
       "etf_code": "510500",
       "index_code": "000905",
       "akshare_symbol": "sh000905",
@@ -66,7 +66,7 @@
     },
     {
       "id": "CYB200",
-      "name": "创业板200",
+      "name": "景顺长城创业板200ETF",
       "etf_code": "159572",
       "index_code": "399019",
       "akshare_symbol": "sz399019",
@@ -105,7 +105,7 @@
     },
     {
       "id": "KCB50",
-      "name": "科创50",
+      "name": "华夏上证科创板50ETF",
       "etf_code": "588000",
       "index_code": "000688",
       "akshare_symbol": "sh000688",
@@ -144,7 +144,7 @@
     },
     {
       "id": "SZ50",
-      "name": "上证50",
+      "name": "华夏上证50ETF",
       "etf_code": "510050",
       "index_code": "000016",
       "akshare_symbol": "sh000016",

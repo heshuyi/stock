@@ -1,5 +1,5 @@
-import type { Metadata } from "next";
-import Link from "next/link";
+import type { Metadata, Viewport } from "next";
+import { DesktopNav, MobileBottomNav } from "@/components/site-nav";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -7,13 +7,11 @@ export const metadata: Metadata = {
   description: "A股宽基分角色差异化定投、空头排列过滤与追踪止盈",
 };
 
-const nav = [
-  { href: "/", label: "今日操作" },
-  { href: "/strategies", label: "策略对比" },
-  { href: "/market", label: "标的详情" },
-  { href: "/database", label: "数据库" },
-  { href: "/settings", label: "持仓与设置" },
-];
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+};
 
 export default function RootLayout({
   children,
@@ -32,32 +30,23 @@ export default function RootLayout({
           rel="stylesheet"
         />
       </head>
-      <body className="min-h-screen antialiased">
-        <div className="mx-auto max-w-6xl px-4 pb-16 pt-8 sm:px-6">
-          <header className="mb-10">
-            <p className="font-display text-4xl tracking-tight text-ink sm:text-5xl">
+      <body className="min-h-screen">
+        <div className="mx-auto max-w-6xl px-4 pb-24 pt-6 sm:px-6 sm:pb-16 sm:pt-8">
+          <header className="mb-6 sm:mb-10">
+            <p className="font-display text-2xl tracking-tight text-ink sm:text-5xl">
               宽基定投投顾
             </p>
-            <p className="mt-2 max-w-2xl text-base text-ink/70">
-              沪深300 / 中证500 / 创业板200 / 科创50 / 上证50 · 分角色定投 · 硬否决可暂停
+            <p className="mt-1 line-clamp-2 max-w-2xl text-sm text-ink/70 sm:mt-2 sm:text-base">
+              华泰柏瑞沪深300ETF（510300）等五只宽基 · 分角色定投 · 硬否决可暂停
             </p>
-            <nav className="mt-6 flex flex-wrap gap-2 border-b border-ink/10 pb-4">
-              {nav.map((item) => (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  className="rounded-md px-3 py-1.5 text-sm font-medium text-ink/80 transition hover:bg-ink/5 hover:text-ink"
-                >
-                  {item.label}
-                </Link>
-              ))}
-            </nav>
+            <DesktopNav />
           </header>
           {children}
-          <footer className="mt-12 border-t border-ink/10 pt-4 text-xs text-ink/50">
+          <footer className="mt-10 border-t border-ink/10 pt-4 text-xs text-ink/50 sm:mt-12">
             策略信号仅供学习与个人研究参考，不构成投资建议。
           </footer>
         </div>
+        <MobileBottomNav />
       </body>
     </html>
   );

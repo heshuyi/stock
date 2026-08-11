@@ -18,26 +18,95 @@ def _as_dates(trading_days: Iterable[str | date]) -> list[date]:
     return sorted(set(out))
 
 
-def extend_calendar(
-    trading_days: Iterable[str | date],
-    *,
-    until: date,
-    from_date: date | None = None,
-) -> list[date]:
-    """Merge warehouse dates with Mon–Fri placeholders beyond last known bar.
+def _expected_prev_session(day: date) -> date:
+    """Last Mon–Fri strictly before `day` (approximate T-1 calendar)."""
+    d = day - timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
 
-    Bars are T-1, so "today" is often absent from the warehouse; weekdays after
-    the last bar are treated as provisional trading days until holidays appear.
-    """
-    days = _as_dates(trading_days)
-    start = from_date or (days[-1] + timedelta(days=1) if days else date.today())
-    cursor = start
+
+def _gap_has_missing_sessions(
+    latest_bar: date, today: date, warehouse: set[date]
+) -> bool:
+    """Any weekday strictly between latest_bar and today without a bar → not open yet."""
+    d = latest_bar + timedelta(days=1)
+    while d < today:
+        if d.weekday() < 5 and d not in warehouse:
+            return True
+        d += timedelta(days=1)
+    return False
+
+
+def is_trading_session(
+    day: date,
+    warehouse: set[date],
+    *,
+    today: date,
+    latest_bar: date | None,
+) -> bool:
+    """True if `day` is a known session, or today with warehouse already at T-1."""
+    if day in warehouse:
+        return True
+    if day != today or day.weekday() >= 5 or latest_bar is None:
+        return False
+    if latest_bar < _expected_prev_session(day):
+        return False
+    if _gap_has_missing_sessions(latest_bar, day, warehouse):
+        return False
+    return True
+
+
+def execution_calendar(
+    warehouse_days: Iterable[str | date],
+    *,
+    today: date,
+    latest_bar: date | None,
+) -> list[date]:
+    """Sessions for execution checks and period_amount — warehouse + maybe today."""
+    days = _as_dates(warehouse_days)
     known = set(days)
+    if is_trading_session(today, known, today=today, latest_bar=latest_bar):
+        if today not in known:
+            days.append(today)
+    return sorted(set(days))
+
+
+def planning_calendar(
+    warehouse_days: Iterable[str | date],
+    *,
+    today: date,
+    latest_bar: date | None,
+    until: date,
+) -> list[date]:
+    """Deprecated: adds naive weekday placeholders. Prefer next_execution_date()."""
+    days = execution_calendar(warehouse_days, today=today, latest_bar=latest_bar)
+    start = (days[-1] + timedelta(days=1)) if days else today
+    known = set(days)
+    cursor = max(start, today)
     while cursor <= until:
         if cursor.isoweekday() <= 5 and cursor not in known:
             days.append(cursor)
         cursor += timedelta(days=1)
     return sorted(set(days))
+
+
+def _would_be_execution_day(
+    day: date,
+    frequency: BuyFrequency,
+    *,
+    weekly_weekday: int,
+    monthly_day: int,
+    schedule_days: list[date],
+) -> bool:
+    """If `day` were a trading session, would the DCA schedule fire?"""
+    if day.weekday() >= 5:
+        return False
+    if frequency == "daily":
+        return True
+    if frequency == "weekly":
+        return resolve_weekly_execution(day, weekly_weekday, schedule_days) == day
+    return resolve_monthly_execution(day, monthly_day, schedule_days) == day
 
 
 def trading_days_in_month(trading_days: list[date], year: int, month: int) -> list[date]:
@@ -127,10 +196,13 @@ def is_execution_day(
     weekly_weekday: int = 1,
     monthly_day: int = 1,
     trading_days: Iterable[str | date],
+    latest_bar: date | None = None,
 ) -> bool:
     days = _as_dates(trading_days)
     trade_set = set(days)
-    if today not in trade_set:
+    if not is_trading_session(
+        today, trade_set, today=today, latest_bar=latest_bar
+    ):
         return False
     if frequency == "daily":
         return True
@@ -141,31 +213,77 @@ def is_execution_day(
     return resolved == today
 
 
+def extend_calendar(
+    trading_days: Iterable[str | date],
+    *,
+    until: date,
+    from_date: date | None = None,
+) -> list[date]:
+    """Legacy helper — prefer execution_calendar / planning_calendar."""
+    today = date.today()
+    latest = _as_dates(trading_days)[-1] if trading_days else None
+    return planning_calendar(
+        trading_days,
+        today=today,
+        latest_bar=latest,
+        until=until,
+    )
+
+
 def next_execution_date(
     today: date,
     frequency: BuyFrequency,
     *,
     weekly_weekday: int = 1,
     monthly_day: int = 1,
-    trading_days: Iterable[str | date],
+    warehouse_days: Iterable[str | date] | None = None,
+    trading_days: Iterable[str | date] | None = None,
+    latest_bar: date | None = None,
     look_ahead_days: int = 400,
 ) -> str | None:
-    days = _as_dates(trading_days)
-    if not days:
-        return None
+    """Next DCA execution: warehouse sessions first, then schedule estimate."""
+    wh = _as_dates(warehouse_days if warehouse_days is not None else (trading_days or []))
+    if not wh and trading_days:
+        wh = _as_dates(trading_days)
+    exec_cal = execution_calendar(wh, today=today, latest_bar=latest_bar)
+    wh_set = set(wh)
     end = today + timedelta(days=look_ahead_days)
-    # Search chronologically among known trading days
-    for d in days:
-        if d < today:
+
+    for d in exec_cal:
+        if d < today or d > end:
             continue
-        if d > end:
-            break
         if is_execution_day(
             d,
             frequency,
             weekly_weekday=weekly_weekday,
             monthly_day=monthly_day,
-            trading_days=days,
+            trading_days=exec_cal,
+            latest_bar=latest_bar,
         ):
             return d.isoformat()
+
+    # Estimate: next calendar slot that matches frequency (may precede bar sync).
+    cursor = today + timedelta(days=1)
+    while cursor <= end:
+        if cursor.weekday() >= 5:
+            cursor += timedelta(days=1)
+            continue
+        hypo = sorted(set(exec_cal + [cursor]))
+        if not _would_be_execution_day(
+            cursor,
+            frequency,
+            weekly_weekday=weekly_weekday,
+            monthly_day=monthly_day,
+            schedule_days=hypo,
+        ):
+            cursor += timedelta(days=1)
+            continue
+        if (
+            latest_bar
+            and cursor <= today
+            and _gap_has_missing_sessions(latest_bar, cursor, wh_set)
+        ):
+            cursor += timedelta(days=1)
+            continue
+        return cursor.isoformat()
     return None

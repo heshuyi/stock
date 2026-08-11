@@ -3,10 +3,13 @@
 from datetime import date
 
 from app.services.schedule import (
+    execution_calendar,
     extend_calendar,
     is_execution_day,
+    is_trading_session,
     next_execution_date,
     period_amount,
+    planning_calendar,
     resolve_monthly_execution,
     resolve_weekly_execution,
     weeks_with_trading_in_month,
@@ -45,48 +48,97 @@ def test_period_amount_weekly_splits_by_weeks():
 
 
 def test_weekly_rolls_forward_within_week():
-    # Monday 2026-07-06 holiday; Tuesday is first trade of week target Mon.
     cal = [d for d in _july_2026_calendar() if d != "2026-07-06"]
-    resolved = resolve_weekly_execution(date(2026, 7, 7), 1, [date.fromisoformat(x) for x in cal])
+    days = [date.fromisoformat(x) for x in cal]
+    latest = date(2026, 7, 5)
+    resolved = resolve_weekly_execution(date(2026, 7, 7), 1, days)
     assert resolved == date(2026, 7, 7)
     assert is_execution_day(
-        date(2026, 7, 7), "weekly", weekly_weekday=1, trading_days=cal
+        date(2026, 7, 7),
+        "weekly",
+        weekly_weekday=1,
+        trading_days=days,
+        latest_bar=latest,
     )
     assert not is_execution_day(
-        date(2026, 7, 8), "weekly", weekly_weekday=1, trading_days=cal
+        date(2026, 7, 8),
+        "weekly",
+        weekly_weekday=1,
+        trading_days=days,
+        latest_bar=latest,
     )
 
 
 def test_monthly_rolls_forward():
-    # Target day 1 is holiday → next trading day
     cal = [d for d in _july_2026_calendar() if d != "2026-07-01"]
-    # 2026-07-01 is Wednesday; remove it → should be 2026-07-02
-    resolved = resolve_monthly_execution(
-        date(2026, 7, 2), 1, [date.fromisoformat(x) for x in cal]
-    )
+    days = [date.fromisoformat(x) for x in cal]
+    latest = date(2026, 6, 30)
+    resolved = resolve_monthly_execution(date(2026, 7, 2), 1, days)
     assert resolved == date(2026, 7, 2)
     assert is_execution_day(
-        date(2026, 7, 2), "monthly", monthly_day=1, trading_days=cal
+        date(2026, 7, 2),
+        "monthly",
+        monthly_day=1,
+        trading_days=days,
+        latest_bar=latest,
     )
     assert not is_execution_day(
-        date(2026, 7, 15), "monthly", monthly_day=1, trading_days=cal
+        date(2026, 7, 15),
+        "monthly",
+        monthly_day=1,
+        trading_days=days,
+        latest_bar=latest,
     )
 
 
 def test_daily_every_trading_day():
     cal = _july_2026_calendar()
-    assert is_execution_day(date(2026, 7, 3), "daily", trading_days=cal)
-    assert not is_execution_day(date(2026, 7, 4), "daily", trading_days=cal)  # Sat
-
-
-def test_extend_calendar_adds_weekday_beyond_last_bar():
-    cal = extend_calendar(
-        ["2026-07-30"],
-        until=date(2026, 7, 31),
-        from_date=date(2026, 7, 31),
+    days = [date.fromisoformat(d) for d in cal]
+    latest = date(2026, 7, 2)
+    assert is_execution_day(
+        date(2026, 7, 3), "daily", trading_days=days, latest_bar=latest
     )
-    assert date(2026, 7, 31) in cal  # Friday provisional
-    assert is_execution_day(date(2026, 7, 31), "daily", trading_days=cal)
+    assert not is_execution_day(
+        date(2026, 7, 4), "daily", trading_days=days, latest_bar=latest
+    )
+
+
+def test_execution_calendar_provisional_today():
+    wh = ["2026-07-30"]
+    today = date(2026, 7, 31)
+    cal = execution_calendar(wh, today=today, latest_bar=date(2026, 7, 30))
+    assert date(2026, 7, 31) in cal
+    assert is_execution_day(
+        today, "daily", trading_days=cal, latest_bar=date(2026, 7, 30)
+    )
+
+
+def test_holiday_gap_not_provisional_trading_day():
+    """Long break without bars → do not treat today as session."""
+    wh = ["2026-09-30"]
+    warehouse = {date.fromisoformat(d) for d in wh}
+    today = date(2026, 10, 8)
+    assert not is_trading_session(
+        today,
+        warehouse,
+        today=today,
+        latest_bar=date(2026, 9, 30),
+    )
+
+
+def test_planning_calendar_adds_weekday_beyond_last_bar():
+    cal = planning_calendar(
+        ["2026-07-30"],
+        today=date(2026, 7, 30),
+        latest_bar=date(2026, 7, 30),
+        until=date(2026, 8, 5),
+    )
+    assert date(2026, 7, 31) in cal
+
+
+def test_extend_calendar_legacy_wrapper():
+    cal = extend_calendar(["2026-07-30"], until=date(2026, 8, 5))
+    assert date(2026, 7, 30) in cal
 
 
 def test_next_execution_after_monthly_day_passed():
@@ -100,6 +152,20 @@ def test_next_execution_after_monthly_day_passed():
         date(2026, 7, 15),
         "monthly",
         monthly_day=1,
-        trading_days=cal,
+        warehouse_days=cal,
+        latest_bar=date(2026, 7, 14),
     )
-    assert nxt == "2026-08-03"  # Aug 1 Sat → Aug 3 Mon
+    assert nxt == "2026-08-03"
+
+
+def test_next_execution_estimates_weekly_when_future_bar_missing():
+    """Next Monday not in warehouse yet → schedule estimate."""
+    cal = _july_2026_calendar()
+    nxt = next_execution_date(
+        date(2026, 7, 10),  # Friday
+        "weekly",
+        weekly_weekday=1,
+        warehouse_days=cal,
+        latest_bar=date(2026, 7, 9),
+    )
+    assert nxt == "2026-07-13"  # next Monday

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date
 from typing import Any
 
 from app.db import (
@@ -14,7 +14,7 @@ from app.models import DashboardResponse, EnsembleResult, Holding, Portfolio
 from app.services.market_data import get_signal_market, warm_latest_snapshots
 from app.services import market_store
 from app.services.schedule import (
-    extend_calendar,
+    execution_calendar,
     is_execution_day,
     next_execution_date,
     period_amount,
@@ -33,6 +33,24 @@ from app.strategies.valuation import valuation_signal
 
 def _holding_map(holdings: list[Holding]) -> dict[str, Holding]:
     return {h.symbol: h for h in holdings}
+
+
+def _strategy_state_changed(before: list[Holding], after: list[Holding]) -> bool:
+    """True when auto-derived trend/trailing fields differ (not shares/cost)."""
+    before_map = {h.symbol: h for h in before}
+    for h in after:
+        prev = before_map.get(h.symbol)
+        if prev is None:
+            if h.trend_state or h.trailing_armed or h.trail_peak_price is not None:
+                return True
+            continue
+        if prev.trend_state != h.trend_state:
+            return True
+        if prev.trailing_armed != h.trailing_armed:
+            return True
+        if prev.trail_peak_price != h.trail_peak_price:
+            return True
+    return False
 
 
 def _clamp_signal_date(as_of: str | None) -> tuple[str | None, str]:
@@ -79,13 +97,17 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
 
     signal_date, as_of_mode = _clamp_signal_date(as_of)
     execution_day = date.today()
-    trading_days = extend_calendar(
-        market_store.list_trading_dates(
-            start=f"{execution_day.year - 1}-01-01",
-            end=f"{execution_day.year + 1}-12-31",
-        ),
-        until=date(execution_day.year + 1, 12, 31),
-        from_date=execution_day - timedelta(days=5),
+    warehouse_days = market_store.list_trading_dates(
+        start=f"{execution_day.year - 1}-01-01",
+        end=f"{execution_day.year + 1}-12-31",
+    )
+    latest_bar: date | None = None
+    if signal_date:
+        latest_bar = date.fromisoformat(str(signal_date)[:10])
+    trading_days = execution_calendar(
+        warehouse_days,
+        today=execution_day,
+        latest_bar=latest_bar,
     )
     p_amount = period_amount(
         settings.base_amount,
@@ -100,13 +122,15 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
         weekly_weekday=settings.weekly_weekday,
         monthly_day=settings.monthly_day,
         trading_days=trading_days,
+        latest_bar=latest_bar,
     )
     next_exec = next_execution_date(
         execution_day if not exec_today else execution_day,
         settings.buy_frequency,
         weekly_weekday=settings.weekly_weekday,
         monthly_day=settings.monthly_day,
-        trading_days=trading_days,
+        warehouse_days=warehouse_days,
+        latest_bar=latest_bar,
     )
     # If today is an execution day, next_execution_date should still report today
     # or the following one for display; prefer today when executing.
@@ -253,7 +277,12 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
             trail_peak_price=holding.trail_peak_price if holding else None,
             valuation_enabled=sym.valuation_enabled,
             enabled=settings.profit_take_enabled,
-            profile=profile,
+            profile=profile.model_copy(
+                update={
+                    "trail_arm_percentile": settings.valuation_reduce_percentile,
+                    "trail_exit_percentile": settings.valuation_exit_percentile,
+                }
+            ),
             pe_percentile=pe_p,
             profit_ratio=profit_ratio,
         )
@@ -292,7 +321,10 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
     for h in portfolio.holdings:
         if h.symbol not in known:
             updated_holdings.append(h)
-    await save_portfolio(Portfolio(holdings=updated_holdings, cash=portfolio.cash))
+    if _strategy_state_changed(portfolio.holdings, updated_holdings):
+        await save_portfolio(
+            Portfolio(holdings=updated_holdings, cash=portfolio.cash)
+        )
 
     items, floor_applied = ensure_minimum_investment(
         items, p_amount, cfg.defaults.minimum_invest_ratio

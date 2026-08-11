@@ -110,8 +110,9 @@ async def update_settings(body: UserSettings):
 
 
 @app.post("/api/jobs/sync")
-async def job_sync(use_mock: bool | None = None):
-    return await sync_all(use_mock=use_mock)
+async def job_sync(use_mock: bool | None = None, force: bool = False):
+    """Sync market data. Skips symbols already fresh at T-1 unless force=true."""
+    return await sync_all(use_mock=use_mock, force=force)
 
 
 @app.post("/api/jobs/backfill")

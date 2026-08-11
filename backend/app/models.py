@@ -70,7 +70,7 @@ class StrategyDefaults(BaseModel):
     weekly_weekday: int = Field(default=1, ge=1, le=5)
     monthly_day: int = Field(default=1, ge=1, le=28)
     profit_take_enabled: bool = True
-    profit_take_return: float = 0.30
+    profit_take_return: float = 0.30  # legacy; return-based exit disabled in v3
     valuation_reduce_percentile: float = 0.80
     valuation_exit_percentile: float = 0.90
     cash_reserve_months: int = 36
@@ -139,7 +139,7 @@ class UserSettings(BaseModel):
     weekly_weekday: int = Field(default=1, ge=1, le=5)
     monthly_day: int = Field(default=1, ge=1, le=28)
     profit_take_enabled: bool = True
-    profit_take_return: float = 0.30
+    profit_take_return: float = 0.30  # legacy; return-based exit disabled in v3
     valuation_reduce_percentile: float = 0.80
     valuation_exit_percentile: float = 0.90
 

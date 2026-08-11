@@ -10,11 +10,12 @@ import sqlite3
 import base64
 import json
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
 DB_PATH = Path(__file__).resolve().parents[2] / "data" / "market.db"
+_READY_PATH: str | None = None
 
 
 def get_db_path() -> Path:
@@ -88,10 +89,19 @@ CREATE TABLE IF NOT EXISTS sync_meta (
 
 
 def ensure_store() -> Path:
+    """Create schema once per DB path; enable WAL for api/worker concurrency."""
+    global _READY_PATH
     path = get_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    path_key = str(path.resolve())
+    if _READY_PATH == path_key:
+        return path
+
+    conn = sqlite3.connect(path, timeout=30)
     try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA synchronous=NORMAL")
         conn.executescript(_SCHEMA)
         columns = {
             row[1] for row in conn.execute("PRAGMA table_info(market_bars)").fetchall()
@@ -101,19 +111,39 @@ def ensure_store() -> Path:
         conn.commit()
     finally:
         conn.close()
+    _READY_PATH = path_key
     return path
 
 
 @contextmanager
 def connect() -> Iterator[sqlite3.Connection]:
     path = ensure_store()
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=5000")
     try:
         yield conn
         conn.commit()
     finally:
         conn.close()
+
+
+def count_bars(symbol: str) -> int:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM market_bars WHERE symbol=?",
+            (symbol,),
+        ).fetchone()
+    return int(row["n"] if row else 0)
+
+
+def get_sync_meta(symbol: str) -> dict[str, Any] | None:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM sync_meta WHERE symbol=? LIMIT 1",
+            (symbol,),
+        ).fetchone()
+    return dict(row) if row else None
 
 
 def delete_symbol(symbol: str) -> dict[str, int]:
@@ -270,6 +300,50 @@ def load_records(symbol: str, limit: int | None = None) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def load_records_since(
+    symbol: str,
+    start: str,
+    *,
+    end: str | None = None,
+) -> list[dict[str, Any]]:
+    """Bars with date >= start (and <= end if given), ascending."""
+    with connect() as conn:
+        if end:
+            rows = conn.execute(
+                """
+                SELECT * FROM market_bars
+                WHERE symbol=? AND date>=? AND date<=?
+                ORDER BY date ASC
+                """,
+                (symbol, start, end),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM market_bars
+                WHERE symbol=? AND date>=?
+                ORDER BY date ASC
+                """,
+                (symbol, start),
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def load_valuation_series(symbol: str) -> list[dict[str, Any]]:
+    """Raw PE/PB observations for percentile history."""
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT date, pe_ttm AS pe, pb
+            FROM valuation_observations
+            WHERE symbol=?
+            ORDER BY date ASC
+            """,
+            (symbol,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def upsert_valuation_observations(
     symbol: str,
     records: list[dict[str, Any]],
@@ -380,8 +454,24 @@ def get_latest_bar(symbol: str, on_or_before: str | None = None) -> dict[str, An
     return dict(row) if row else None
 
 
+def expected_trading_t1(today: date | None = None) -> date:
+    """Approximate previous A-share session: last Mon–Fri strictly before today.
+
+    Ignores exchange holidays (may ask sync to check one extra day — harmless).
+    Used for freshness: warehouse-derived resolve_signal_date() cannot detect lag.
+    """
+    d = (today or date.today()) - timedelta(days=1)
+    while d.weekday() >= 5:  # Sat/Sun
+        d -= timedelta(days=1)
+    return d
+
+
 def resolve_signal_date(today: date | None = None) -> str | None:
-    """Use previous available trading day (T-1): max(date) strictly before today."""
+    """Available signal day in warehouse: max(date) strictly before today.
+
+    This is what the dashboard can use now — not necessarily calendar T-1.
+    If the warehouse is stale, this stays on the tip until sync catches up.
+    """
     today = today or date.today()
     cutoff = today.isoformat()
     with connect() as conn:
@@ -527,13 +617,17 @@ def data_status() -> dict[str, Any]:
             "SELECT COUNT(*) FROM backfill_months WHERE status='done'"
         ).fetchone()[0]
         total_bars = conn.execute("SELECT COUNT(*) FROM market_bars").fetchone()[0]
+    warehouse = resolve_signal_date()
+    calendar_t1 = expected_trading_t1().isoformat()
     return {
         "db_path": str(get_db_path()),
         "total_bars": total_bars,
         "months_done": done,
         "months_pending": pending,
         "symbols": metas,
-        "signal_date": resolve_signal_date(),
+        "signal_date": warehouse,
+        "calendar_t1": calendar_t1,
+        "warehouse_fresh": bool(warehouse and warehouse >= calendar_t1),
     }
 
 
@@ -622,6 +716,8 @@ def data_overview() -> dict[str, Any]:
         if total
         else 0.0
     )
+    warehouse = resolve_signal_date()
+    calendar_t1 = expected_trading_t1().isoformat()
     return {
         "db_path": str(path),
         "db_size_bytes": path.stat().st_size if path.exists() else 0,
@@ -630,7 +726,9 @@ def data_overview() -> dict[str, Any]:
         "monthly": list(reversed(monthly)),
         "sync_meta": sync_meta,
         "valuations": valuations,
-        "signal_date": resolve_signal_date(),
+        "signal_date": warehouse,
+        "calendar_t1": calendar_t1,
+        "warehouse_fresh": bool(warehouse and warehouse >= calendar_t1),
     }
 
 

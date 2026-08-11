@@ -81,8 +81,11 @@ export interface UserSettings {
   weekly_weekday: number;
   monthly_day: number;
   profit_take_enabled: boolean;
+  /** @deprecated 账户收益率触发已停用，保留字段仅为兼容旧数据 */
   profit_take_return: number;
+  /** 全局止盈：估值武装分位（0–1），覆盖各标的 profile 的 trail_arm */
   valuation_reduce_percentile: number;
+  /** 全局止盈：估值清仓分位（0–1），覆盖各标的 profile 的 trail_exit */
   valuation_exit_percentile: number;
 }
 
@@ -113,6 +116,8 @@ export interface DatabaseOverview {
   db_path: string;
   db_size_bytes: number;
   signal_date: string | null;
+  calendar_t1?: string | null;
+  warehouse_fresh?: boolean;
   overall: {
     total_rows: number;
     symbol_count: number;
@@ -171,6 +176,33 @@ export interface DatabaseRowsPage {
   limit: number;
 }
 
+export interface SyncSymbolResult {
+  symbol: string;
+  source: string;
+  mode: "skipped" | "incremental" | "full" | "error";
+  rows_added?: number;
+  rows?: number;
+  latest_date?: string | null;
+  latest_close?: number | null;
+  valuation_source?: string | null;
+  error?: string;
+  stored_in?: string;
+}
+
+export interface SyncResult {
+  synced_at: string;
+  results: SyncSymbolResult[];
+  skipped: number;
+  incremental: number;
+  fetched: number;
+  rows_added: number;
+  warning?: string | null;
+  live: boolean;
+  force: boolean;
+  purged?: unknown[];
+  data_status?: Record<string, unknown>;
+}
+
 const API_BASE =
   typeof window !== "undefined"
     ? "" // browser: same-origin via Next rewrite → no CORS
@@ -227,10 +259,11 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(body),
     }),
-  sync: () =>
-    request<Record<string, unknown>>("/api/jobs/sync?use_mock=false", {
-      method: "POST",
-    }),
+  sync: (force = false) =>
+    request<SyncResult>(
+      `/api/jobs/sync?use_mock=false&force=${force ? "true" : "false"}`,
+      { method: "POST" }
+    ),
   databaseOverview: () => request<DatabaseOverview>("/api/data/overview"),
   databaseRows: (params: {
     symbol?: string;
@@ -257,6 +290,21 @@ export const STRATEGY_LABELS: Record<string, string> = {
 
 export function actionLabel(action: Action): string {
   return { buy: "买入", pause: "暂停", reduce: "减仓", hold: "观望" }[action];
+}
+
+/** Display as Chinese full name + security code, e.g. 华泰柏瑞沪深300ETF（510300） */
+export function symbolLabel(
+  name: string,
+  etfCode?: string | null,
+  fallbackId?: string
+): string {
+  const code = (etfCode || "").trim();
+  const title = (name || fallbackId || "").trim();
+  if (title && code) {
+    if (title.includes(code) || title.includes(`（${code}）`)) return title;
+    return `${title}（${code}）`;
+  }
+  return title || code || fallbackId || "";
 }
 
 export function actionClass(action: Action): string {
