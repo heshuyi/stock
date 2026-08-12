@@ -12,8 +12,10 @@ export MARKET_DB_PATH="${MARKET_DB_PATH:-$ROOT/backend/data/market.db}"
 export PYTHONPATH="$ROOT/backend"
 export API_URL="${API_URL:-http://127.0.0.1:8000}"
 export CORS_ORIGINS="${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}"
+export STOCK_SYNC_CONCURRENCY="${STOCK_SYNC_CONCURRENCY:-1}"
 
 pkill -f "uvicorn app.main:app" 2>/dev/null || true
+pkill -f "scripts/api_watchdog.py" 2>/dev/null || true
 pkill -f "next-server\|next dev" 2>/dev/null || true
 pkill -f "next dev --port 3000" 2>/dev/null || true
 sleep 1
@@ -48,6 +50,18 @@ api = subprocess.Popen(
 )
 Path("/tmp/stock-api.pid").write_text(str(api.pid))
 print(f"API pid {api.pid}")
+
+watchdog = subprocess.Popen(
+    [str(venv_python), str(root / "scripts" / "api_watchdog.py")],
+    cwd=str(root),
+    env=env,
+    stdout=open("/tmp/stock-api-watchdog.log", "w"),
+    stderr=subprocess.STDOUT,
+    stdin=subprocess.DEVNULL,
+    start_new_session=True,
+)
+Path("/tmp/stock-api-watchdog.pid").write_text(str(watchdog.pid))
+print(f"WATCHDOG pid {watchdog.pid}")
 
 web = subprocess.Popen(
     ["npm", "run", "dev", "--", "--port", "3000", "--hostname", "127.0.0.1"],
@@ -91,4 +105,4 @@ fi
 curl --noproxy '*' -sf http://127.0.0.1:8000/api/health && echo
 curl --noproxy '*' -sf -o /dev/null -w "today:%{http_code}\n" http://127.0.0.1:3000/api/dashboard/today
 echo "Open http://127.0.0.1:3000"
-echo "PIDs: /tmp/stock-api.pid /tmp/stock-web.pid (detached sessions)"
+echo "PIDs: /tmp/stock-api.pid /tmp/stock-web.pid /tmp/stock-api-watchdog.pid"

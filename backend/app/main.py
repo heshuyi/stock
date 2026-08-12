@@ -22,9 +22,12 @@ from app.services.market_data import (
     backfill_idle_chunk,
     get_market_series,
     hydrate_db_from_disk_cache,
-    sync_all,
 )
+from app.services.sync_runner import sync_all_isolated
 from app.services import market_store
+
+
+_sync_lock = asyncio.Lock()
 
 
 @asynccontextmanager
@@ -111,8 +114,9 @@ async def update_settings(body: UserSettings):
 
 @app.post("/api/jobs/sync")
 async def job_sync(use_mock: bool | None = None, force: bool = False):
-    """Sync market data. Skips symbols already fresh at T-1 unless force=true."""
-    return await sync_all(use_mock=use_mock, force=force)
+    """Sync market data in an isolated subprocess (survives mini_racer abort)."""
+    async with _sync_lock:
+        return await sync_all_isolated(use_mock=use_mock, force=force)
 
 
 @app.post("/api/jobs/backfill")

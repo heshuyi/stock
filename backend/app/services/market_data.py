@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -18,7 +19,8 @@ from app.services import market_store
 VALUATION_WINDOW_DAYS = 5 * 252
 FULL_VALUATION_WINDOW_DAYS = 100 * 365
 FREE_VALUATION_SYMBOLS = {"HS300", "ZZ500", "CYB200", "KCB50", "SZ50"}
-SYNC_CONCURRENCY = 3
+# Default 1: parallel akshare + py_mini_racer can native-abort the process.
+SYNC_CONCURRENCY = int(os.environ.get("STOCK_SYNC_CONCURRENCY", "1"))
 # Bars kept from warehouse when appending new sessions (MA120 + 1y drawdown).
 INCREMENTAL_LOOKBACK_BARS = 320
 

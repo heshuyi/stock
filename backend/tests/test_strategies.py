@@ -231,11 +231,13 @@ def test_profit_taking_requires_a_position():
 
 
 def test_rebalance_underweight():
+    """Legacy module smoke test (not used by engine)."""
     s = rebalance_signal("HS300", current_weight=0.2, target_weight=0.4)
     assert s.multiplier == 1.4
 
 
 def test_grid_deep_drawdown():
+    """Legacy module smoke test (not used by engine)."""
     s = grid_signal("HS300", 0.35)
     assert s.multiplier == 1.6
 

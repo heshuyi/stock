@@ -211,16 +211,26 @@ const API_BASE =
       "http://127.0.0.1:8000";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(init?.headers || {}),
-    },
-    cache: "no-store",
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      ...init,
+      headers: {
+        "Content-Type": "application/json",
+        ...(init?.headers || {}),
+      },
+      cache: "no-store",
+    });
+  } catch {
+    throw new Error(
+      "无法连接后端。请确认已运行 ./scripts/dev.sh，并打开 http://127.0.0.1:3000"
+    );
+  }
   if (!res.ok) {
     const text = await res.text();
+    const looksHtml =
+      text.trimStart().startsWith("<!") ||
+      /internal server error/i.test(text);
     try {
       const body = JSON.parse(text) as { detail?: unknown };
       if (typeof body.detail === "string") {
@@ -230,8 +240,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
         throw new Error(JSON.stringify(body.detail));
       }
     } catch (e) {
-      if (e instanceof SyntaxError) {
-        throw new Error(text || `Request failed: ${res.status}`);
+      if (e instanceof SyntaxError || looksHtml) {
+        throw new Error(
+          looksHtml || res.status >= 500
+            ? `后端不可用（${res.status}）。请重新运行 ./scripts/dev.sh 后刷新。`
+            : text || `Request failed: ${res.status}`
+        );
       }
       throw e;
     }
