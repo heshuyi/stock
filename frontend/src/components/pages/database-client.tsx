@@ -147,7 +147,6 @@ export default function DatabasePage() {
   }
 
   const monthly = useMemo(() => overview?.monthly ?? [], [overview]);
-  const quality = overview?.overall.quality_score ?? 0;
   const pageNumber = cursorHistory.length + 1;
 
   return (
@@ -196,9 +195,24 @@ export default function DatabasePage() {
               detail={`${overview.overall.earliest_date ?? "—"} 至 ${overview.overall.latest_date ?? "—"}`}
             />
             <StatCard
-              label="数据质量"
-              value={`${quality.toFixed(2)}%`}
+              label="价格完整度"
+              value={`${overview.overall.price_completeness_pct.toFixed(2)}%`}
+              detail={`缺收盘 ${overview.overall.missing_close} 行`}
+            />
+            <StatCard
+              label="估值完整度"
+              value={`${overview.overall.valuation_completeness_pct.toFixed(2)}%`}
               detail={`缺 PE ${overview.overall.missing_pe} · 缺 PB ${overview.overall.missing_pb}`}
+            />
+            <StatCard
+              label="估值新鲜度"
+              value={`${overview.overall.valuation_freshness_pct.toFixed(2)}%`}
+              detail="估值滞后不超过 5 个 XSHG 交易日"
+            />
+            <StatCard
+              label="ETF 完整度"
+              value={`${overview.overall.etf_completeness_pct.toFixed(2)}%`}
+              detail={`旧版综合质量 ${overview.overall.quality_score.toFixed(2)}%`}
             />
           </section>
 

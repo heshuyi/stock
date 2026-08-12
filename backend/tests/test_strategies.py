@@ -74,6 +74,35 @@ def test_valuation_missing_does_not_assume_neutral():
     assert s.meta["data_missing"] is True
 
 
+def test_valuation_stale_beyond_five_sessions_safe_pauses():
+    s = valuation_signal(
+        "HS300",
+        0.2,
+        0.3,
+        profile=CORE,
+        valuation_asof="2026-07-27",
+        valuation_lag_sessions=6,
+    )
+    assert s.action == "pause"
+    assert s.multiplier == 0
+    assert s.meta["data_missing"] is True
+    assert "估值滞后 6 个交易日" in s.reason
+
+
+def test_valuation_five_session_lag_is_still_usable():
+    s = valuation_signal(
+        "HS300",
+        0.2,
+        0.3,
+        profile=CORE,
+        valuation_asof="2026-07-28",
+        valuation_lag_sessions=5,
+    )
+    assert s.action == "buy"
+    assert s.meta["data_missing"] is False
+    assert s.meta["valuation_lag_sessions"] == 5
+
+
 def test_valuation_composite_uses_pe_pb_weights():
     s = valuation_signal("CYB200", 0.2, 0.8, pe=30, pb=4, profile=GROWTH)
     expected = 0.55 * 0.2 + 0.45 * 0.8

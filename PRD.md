@@ -66,10 +66,14 @@ final\_mult = \mathrm{clip}(w_v \cdot m_{val} + w_t \cdot m_{trend},\; 0,\; max\
 
 - **武装线 / 清仓线**：以设置页全局 `valuation_reduce_percentile` / `valuation_exit_percentile` 为准（引擎覆盖 profile）。  
 - **追踪回撤幅度** `trail_drawdown`：按角色模板（核心 10%，成长 8%）。  
-- 配置里不再为各标的单独写武装/清仓分位，避免与设置页双轨冲突。### 3.2 估值
+- 配置里不再为各标的单独写武装/清仓分位，避免与设置页双轨冲突。
+
+### 3.2 估值
 
 - 核心：PE 分位为主；成长：0.55×PE + 0.45×PB 复合。  
 - 各标的 pause 阈值与倍数档见 `configs/symbols.json` → `strategy_profile`。
+- `5y` 分位窗口按信号日向前回溯 **5 个自然年**，不以 252 日近似；样本少于 5 个时视为数据缺失。
+- 估值日期与价格日期分别管理；估值最多允许滞后 5 个 XSHG 交易日，超过阈值按数据缺失安全暂停新增，不解释为“估值过高”。
 
 ### 3.3 趋势
 
