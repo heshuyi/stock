@@ -34,6 +34,12 @@ def profit_taking_signal(
     next_peak = trail_peak_price
     reason = "未触发止盈条件"
 
+    if not has_position:
+        recommended_stage = 0
+        next_armed = False
+        next_peak = None
+        reason = "当前无持仓，已重置止盈追踪状态"
+
     if enabled and has_position and current_stage < 2 and valuation_enabled:
         arm = float(profile.trail_arm_percentile)
         exit_p = float(profile.trail_exit_percentile)

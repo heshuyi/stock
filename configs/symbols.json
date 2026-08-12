@@ -215,7 +215,6 @@
     "weekly_weekday": 1,
     "monthly_day": 1,
     "profit_take_enabled": true,
-    "profit_take_return": 0.3,
     "valuation_reduce_percentile": 0.8,
     "valuation_exit_percentile": 0.9,
     "strategy_weights": {

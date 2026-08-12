@@ -42,7 +42,7 @@ def _holding_map(holdings: list[Holding]) -> dict[str, Holding]:
 
 
 def _strategy_state_changed(before: list[Holding], after: list[Holding]) -> bool:
-    """True when auto-derived trend/trailing fields differ (not shares/cost)."""
+    """True when auto-derived trend/profit-taking fields differ."""
     before_map = {h.symbol: h for h in before}
     for h in after:
         prev = before_map.get(h.symbol)
@@ -51,6 +51,8 @@ def _strategy_state_changed(before: list[Holding], after: list[Holding]) -> bool
                 return True
             continue
         if prev.trend_state != h.trend_state:
+            return True
+        if prev.take_profit_stage != h.take_profit_stage:
             return True
         if prev.trailing_armed != h.trailing_armed:
             return True
@@ -213,6 +215,7 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
         portfolio.cash,
         settings.base_amount,
         cfg.defaults.cash_reserve_months,
+        enabled=settings.cash_pool_enabled,
     )
     max_mult = 2.0 if pool_factor >= 1.0 else 1.8
     cap_ratio = 2.0 if pool_factor >= 1.0 else settings.normalize_buy_cap
@@ -344,7 +347,9 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
                 shares=base_h.shares,
                 cost_price=base_h.cost_price,
                 market_value=base_h.market_value,
-                take_profit_stage=base_h.take_profit_stage,
+                take_profit_stage=(
+                    base_h.take_profit_stage if base_h.shares > 0 else 0
+                ),
                 trend_state=trend_state,
                 trailing_armed=bool(s_profit.meta.get("trailing_armed")),
                 trail_peak_price=s_profit.meta.get("trail_peak_price"),
@@ -384,8 +389,6 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
             (warning + "；" if warning else "")
             + f"现金池调节系数 {pool_factor:.2f}"
         )
-        if pool_factor < 0.5:
-            warning += "（弹药偏薄，已额外降速）"
 
     items, normalized = normalize_amounts(items, p_amount, cap_ratio)
 
