@@ -44,6 +44,12 @@ export default function MarketPage() {
       .finally(() => setLoading(false));
   }, [symbol]);
 
+  const current = symbols.find((s) => s.id === symbol);
+  const isComposite =
+    current?.strategy_profile?.valuation_mode === "pe_pb_composite";
+  const peWeight = current?.strategy_profile?.pe_weight ?? 0.55;
+  const pbWeight = current?.strategy_profile?.pb_weight ?? 0.45;
+
   const chart = useMemo(
     () =>
       series.map((p) => ({
@@ -57,12 +63,32 @@ export default function MarketPage() {
           p.pe_percentile != null
             ? Number((p.pe_percentile * 100).toFixed(1))
             : undefined,
+        pbPct:
+          p.pb_percentile != null
+            ? Number((p.pb_percentile * 100).toFixed(1))
+            : undefined,
+        compositePct:
+          isComposite &&
+          p.pe_percentile != null &&
+          p.pb_percentile != null
+            ? Number(
+                (
+                  (peWeight * p.pe_percentile + pbWeight * p.pb_percentile) *
+                  100
+                ).toFixed(1)
+              )
+            : undefined,
       })),
-    [series]
+    [isComposite, pbWeight, peWeight, series]
   );
 
   const latest = series[series.length - 1];
-  const current = symbols.find((s) => s.id === symbol);
+  const latestComposite =
+    isComposite &&
+    latest?.pe_percentile != null &&
+    latest.pb_percentile != null
+      ? peWeight * latest.pe_percentile + pbWeight * latest.pb_percentile
+      : null;
 
   return (
     <main>
@@ -85,14 +111,27 @@ export default function MarketPage() {
       />
 
       {current && latest && !loading && (
-        <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <div className="mt-6 grid grid-cols-2 gap-3 xl:grid-cols-4">
           <Stat label={`收盘（${latest.date}）`} value={latest.close.toFixed(2)} />
+          <Stat label="PE" value={latest.pe != null ? latest.pe.toFixed(2) : "—"} />
+          <Stat label="PB" value={latest.pb != null ? latest.pb.toFixed(2) : "—"} />
           <Stat
-            label="估值分位(PE)"
+            label={isComposite ? "PE/PB 复合分位" : "估值分位(PE)"}
             value={
-              latest.pe_percentile != null
+              latestComposite != null
+                ? `${(latestComposite * 100).toFixed(0)}%`
+                : latest.pe_percentile != null
                 ? `${(latest.pe_percentile * 100).toFixed(0)}%`
                 : "—"
+            }
+          />
+          <Stat label="估值日期" value={latest.valuation_asof ?? "—"} />
+          <Stat
+            label="估值口径"
+            value={
+              current.valuation_proxy
+                ? current.valuation_proxy_label || "市场代理估值"
+                : latest.valuation_source || "指数估值"
             }
           />
           <Stat
@@ -148,8 +187,8 @@ export default function MarketPage() {
         </div>
         <div className="flex h-56 flex-col overflow-hidden rounded-xl border border-ink/10 bg-white/70 p-3 sm:h-72 sm:p-4">
           <ChartCaption
-            title="PE 历史分位 %"
-            note="当前 PE 在历史样本中的百分位（0=极便宜，100=极贵）。估值策略据此调节定投：分位高则少投或暂停，分位低则多投。"
+            title={isComposite ? "PE / PB / 复合历史分位 %" : "PE 历史分位 %"}
+            note="当前估值在历史样本中的百分位（0=极便宜，100=极贵）。成长标的同时展示 PE/PB 加权复合分位。"
           />
           <div className="min-h-0 flex-1">
             <ResponsiveContainer width="100%" height="100%">
@@ -159,6 +198,12 @@ export default function MarketPage() {
               <YAxis width={36} domain={[0, 100]} tick={{ fontSize: 10 }} />
               <Tooltip />
               <Line type="monotone" dataKey="pePct" name="PE分位%" stroke="#1f6f5b" dot={false} />
+              {isComposite && (
+                <Line type="monotone" dataKey="pbPct" name="PB分位%" stroke="#3d5a80" dot={false} />
+              )}
+              {isComposite && (
+                <Line type="monotone" dataKey="compositePct" name="复合分位%" stroke="#c45c26" dot={false} strokeWidth={2} />
+              )}
             </LineChart>
           </ResponsiveContainer>
           </div>
