@@ -1,3 +1,9 @@
+"""DEPRECATED — not used by the v3 ensemble / engine.
+
+Do not wire back into ``compute_dashboard`` without an explicit PRD change
+(see PRD §7 非目标). Kept for unit tests and optional experiments.
+"""
+
 from __future__ import annotations
 
 from app.models import StrategySignal
@@ -8,11 +14,7 @@ def rebalance_signal(
     current_weight: float | None,
     target_weight: float,
 ) -> StrategySignal:
-    """Fixed amount + drift vs target weight.
-
-Legacy module — v3 ensemble does NOT call this (see PRD §7 非目标).
-Kept for unit tests and optional future experiments.
-"""
+    """Fixed amount + drift vs target weight (legacy)."""
     if current_weight is None:
         return StrategySignal(
             strategy="rebalance",

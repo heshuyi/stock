@@ -1,14 +1,16 @@
+"""DEPRECATED — not used by the v3 ensemble / engine.
+
+Do not wire back into ``compute_dashboard`` without an explicit PRD change
+(see PRD §7 非目标). Kept for unit tests and optional experiments.
+"""
+
 from __future__ import annotations
 
 from app.models import StrategySignal
 
 
 def grid_signal(symbol: str, drawdown: float) -> StrategySignal:
-    """1y high drawdown grid add-on.
-
-Legacy module — v3 ensemble does NOT call this (see PRD §7 非目标).
-Kept for unit tests and optional future experiments.
-"""
+    """1y high drawdown grid add-on (legacy)."""
     dd = max(0.0, drawdown)
     if dd < 0.05:
         mult, reason = 0.9, f"回撤 {dd:.1%} <5%，靠近高点少投"

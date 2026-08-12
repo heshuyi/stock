@@ -271,7 +271,7 @@ export default function SettingsPage() {
                 })
               }
             />
-            启用硬否决（估值 pause；成长仓空头排列时暂停，超跌可解封）
+            启用硬否决（关闭后：估值 pause 与成长仓空头硬停均可被突破，买入侧风控变弱）
           </label>
 
           <label className="flex min-h-11 items-center gap-3 text-sm sm:col-span-2">
@@ -309,7 +309,7 @@ export default function SettingsPage() {
                   }
                 />
                 <p className="text-xs text-ink/45">
-                  达到该分位后开启峰值追踪；默认 80%，全局覆盖各标的 profile
+                  全局唯一武装线（覆盖所有标的）；默认 80%
                 </p>
               </div>
               <div className="space-y-1.5">
@@ -330,8 +330,8 @@ export default function SettingsPage() {
                   }
                 />
                 <p className="text-xs text-ink/45">
-                  达到该分位建议清仓级减持；默认 90%。追踪回撤阈值仍按各标的
-                  profile
+                  全局唯一清仓线；默认 90%。回撤幅度按角色模板（核心
+                  10% / 成长 8%），不在此页配置
                 </p>
               </div>
             </>

@@ -32,7 +32,7 @@ const BASIS_SECTIONS = [
   },
   {
     title: "分批止盈",
-    body: "不参与买入倍数加权。估值达武装线后追踪峰值回撤；回撤达标建议减半仓，达清仓线建议清仓级减持。列上：触发减仓为 0，否则为 1。",
+    body: "不参与买入倍数加权。表列展示「未触发」或「减xx%」。武装/清仓分位以设置页全局为准；回撤幅度按核心10%/成长8%角色模板。",
   },
   {
     title: "合成倍数",
@@ -47,6 +47,12 @@ function signalOf(item: EnsembleItem, key: string) {
 function multLabel(item: EnsembleItem, key: string): string {
   const s = signalOf(item, key);
   if (!s) return key === "valuation" ? "不适用" : "—";
+  if (key === "profit_taking") {
+    if (s.reduce_ratio != null && s.reduce_ratio > 0) {
+      return `减${Math.round(s.reduce_ratio * 100)}%`;
+    }
+    return "未触发";
+  }
   return Number(s.multiplier.toFixed(2)).toString();
 }
 
@@ -224,7 +230,7 @@ export default function StrategiesPage() {
                       均线
                     </th>
                     <th className="whitespace-nowrap px-3 py-3 font-medium sm:px-4">
-                      止盈
+                      止盈建议
                     </th>
                     <th className="whitespace-nowrap px-3 py-3 font-medium sm:px-4">
                       合成
