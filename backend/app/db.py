@@ -61,9 +61,9 @@ def _default_settings(cfg: AppConfig) -> UserSettings:
         weekly_weekday=cfg.defaults.weekly_weekday,
         monthly_day=cfg.defaults.monthly_day,
         profit_take_enabled=cfg.defaults.profit_take_enabled,
-        profit_take_return=cfg.defaults.profit_take_return,
         valuation_reduce_percentile=cfg.defaults.valuation_reduce_percentile,
         valuation_exit_percentile=cfg.defaults.valuation_exit_percentile,
+        cash_pool_enabled=False,
         target_weights={s.id: s.target_weight for s in cfg.symbols},
     )
 
@@ -158,6 +158,8 @@ async def get_user_settings() -> UserSettings:
         doc["weekly_weekday"] = cfg.defaults.weekly_weekday
     if doc.get("monthly_day") is None:
         doc["monthly_day"] = cfg.defaults.monthly_day
+    if doc.get("cash_pool_enabled") is None:
+        doc["cash_pool_enabled"] = False
     return UserSettings.model_validate(doc)
 
 
@@ -182,11 +184,17 @@ async def get_portfolio() -> Portfolio:
 
 
 async def save_portfolio(portfolio: Portfolio) -> Portfolio:
+    normalized = portfolio.model_copy(deep=True)
+    for holding in normalized.holdings:
+        if holding.shares <= 0:
+            holding.take_profit_stage = 0
+            holding.trailing_armed = False
+            holding.trail_peak_price = None
     db = get_db()
     await db.portfolio.update_one(
         {"_id": "default"},
-        {"$set": portfolio.model_dump()},
+        {"$set": normalized.model_dump()},
         upsert=True,
     )
-    save_user_state(portfolio=portfolio)
-    return portfolio
+    save_user_state(portfolio=normalized)
+    return normalized

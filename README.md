@@ -51,6 +51,19 @@ cd backend && pytest -q
 默认权重：HS300 35% / ZZ500 25% / CYB200 15% / KCB50 10% / SZ50 15%。  
 `GET /api/data/status` 查看入库与月度补齐进度。
 
+设置保存会校验预算、现金、份额、成本、预算上限、均线周期、止盈分位和目标权重；目标权重只接受上述标的且合计必须为 1。现金池默认关闭；启用后现金余额是实值，`0` 表示弹药为空，并按页面显示的 `pool_factor` 直接缩放。
+
+## 离线回测
+
+回测只读取本地 `backend/data/market.db`，使用 T-1 信号并在下一交易日执行：
+
+```bash
+PYTHONPATH=backend backend/.venv/bin/python backend/scripts/backtest_strategy.py \
+  --start 2020-01-01 --frequency monthly --monthly-cashflow 10000
+```
+
+输出策略与等权固定定投的 XIRR、TWR、最大回撤、波动率、暂停率、成本敏感性和年度摘要。回测受样本期、代理估值与 ETF 上市日期限制；策略仍需要严格的样本外证据，历史结果不构成投资建议。
+
 ## 本地代理
 
 ```bash

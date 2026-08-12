@@ -5,6 +5,7 @@ import {
   Portfolio,
   SymbolInfo,
   UserSettings,
+  ApiError,
   api,
   symbolLabel,
 } from "@/lib/api";
@@ -27,6 +28,7 @@ export default function SettingsPage() {
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
   useEffect(() => {
     Promise.all([api.symbols(), api.settings(), api.portfolio()])
@@ -37,6 +39,7 @@ export default function SettingsPage() {
           buy_frequency: set.buy_frequency || "monthly",
           weekly_weekday: set.weekly_weekday ?? 1,
           monthly_day: set.monthly_day ?? 1,
+          cash_pool_enabled: set.cash_pool_enabled ?? false,
         });
         const ids = sym.symbols.map((s) => s.id);
         const holdings = (ids.length ? ids : DEFAULT_SYMBOLS).map((id) => {
@@ -63,11 +66,35 @@ export default function SettingsPage() {
     if (!settings || !portfolio) return;
     setMessage(null);
     setError(null);
+    const localErrors: Record<string, string> = {};
+    if (settings.ma_short >= settings.ma_long) {
+      localErrors.ma_range = "短均线周期必须小于长均线周期";
+    }
+    if (
+      settings.valuation_reduce_percentile >=
+      settings.valuation_exit_percentile
+    ) {
+      localErrors.valuation_range = "估值武装线必须低于估值清仓线";
+    }
+    const targetWeights = settings.target_weights || {};
+    const weightTotal = Object.values(targetWeights).reduce(
+      (sum, weight) => sum + weight,
+      0
+    );
+    if (Math.abs(weightTotal - 1) > 1e-6) {
+      localErrors.target_weights = `目标权重合计必须为 1，当前为 ${weightTotal.toFixed(6)}`;
+    }
+    setFieldErrors(localErrors);
+    if (Object.keys(localErrors).length) {
+      setError("请修正标注的设置后再保存");
+      return;
+    }
     try {
       await api.saveSettings(settings);
       await api.savePortfolio(portfolio);
       setMessage("已保存设置与持仓（写入本地 user_state.json，重启后仍保留）");
     } catch (e) {
+      if (e instanceof ApiError) setFieldErrors(e.fieldErrors);
       setError(e instanceof Error ? e.message : "保存失败");
     }
   }
@@ -100,6 +127,9 @@ export default function SettingsPage() {
             <Input
               id="base-amount"
               type="number"
+              min={0}
+              max={1000000000}
+              aria-invalid={Boolean(fieldErrors.base_amount)}
               className="h-11 bg-white"
               value={settings.base_amount}
               onChange={(e) =>
@@ -112,6 +142,9 @@ export default function SettingsPage() {
             <p className="text-xs text-ink/45">
               不随频率改变含义；每日/每周会按当月交易日或周数拆分
             </p>
+            {fieldErrors.base_amount && (
+              <p className="text-xs text-red-600">{fieldErrors.base_amount}</p>
+            )}
           </div>
 
           <div className="space-y-1.5">
@@ -187,11 +220,30 @@ export default function SettingsPage() {
             </div>
           )}
 
+          <label className="flex min-h-11 items-center gap-3 text-sm sm:col-span-2">
+            <input
+              type="checkbox"
+              className="h-5 w-5 shrink-0 accent-moss"
+              checked={settings.cash_pool_enabled}
+              onChange={(e) =>
+                setSettings({
+                  ...settings,
+                  cash_pool_enabled: e.target.checked,
+                })
+              }
+            />
+            启用现金池弹药调节（启用后，现金余额会直接缩放定投额度）
+          </label>
+
           <div className="space-y-1.5">
             <Label htmlFor="cash">可支配定投储备（元）</Label>
             <Input
               id="cash"
               type="number"
+              min={0}
+              max={1000000000000}
+              disabled={!settings.cash_pool_enabled}
+              aria-invalid={Boolean(fieldErrors.cash)}
               className="h-11 bg-white"
               value={portfolio.cash}
               onChange={(e) =>
@@ -202,8 +254,11 @@ export default function SettingsPage() {
               }
             />
             <p className="text-xs text-ink/45">
-              用于 36 个月弹药深度调节；填 0 表示不启用现金池缩放
+              以 36 个月预算为满额基准；启用时 0 表示现金池为空，最低按 0.35× 缩放
             </p>
+            {fieldErrors.cash && (
+              <p className="text-xs text-red-600">{fieldErrors.cash}</p>
+            )}
           </div>
 
           <div className="space-y-1.5">
@@ -212,6 +267,9 @@ export default function SettingsPage() {
               id="buy-cap"
               type="number"
               step="0.1"
+              min={0}
+              max={10}
+              aria-invalid={Boolean(fieldErrors.normalize_buy_cap)}
               className="h-11 bg-white"
               value={settings.normalize_buy_cap}
               onChange={(e) =>
@@ -221,6 +279,11 @@ export default function SettingsPage() {
                 })
               }
             />
+            {fieldErrors.normalize_buy_cap && (
+              <p className="text-xs text-red-600">
+                {fieldErrors.normalize_buy_cap}
+              </p>
+            )}
           </div>
 
           <div className="space-y-1.5">
@@ -228,6 +291,9 @@ export default function SettingsPage() {
             <Input
               id="ma-short"
               type="number"
+              min={1}
+              max={2000}
+              aria-invalid={Boolean(fieldErrors.ma_short || fieldErrors.ma_range)}
               className="h-11 bg-white"
               value={settings.ma_short}
               onChange={(e) =>
@@ -237,6 +303,9 @@ export default function SettingsPage() {
                 })
               }
             />
+            {fieldErrors.ma_short && (
+              <p className="text-xs text-red-600">{fieldErrors.ma_short}</p>
+            )}
           </div>
 
           <div className="space-y-1.5">
@@ -244,6 +313,9 @@ export default function SettingsPage() {
             <Input
               id="ma-long"
               type="number"
+              min={2}
+              max={2000}
+              aria-invalid={Boolean(fieldErrors.ma_long || fieldErrors.ma_range)}
               className="h-11 bg-white"
               value={settings.ma_long}
               onChange={(e) =>
@@ -253,11 +325,19 @@ export default function SettingsPage() {
                 })
               }
             />
+            {fieldErrors.ma_long && (
+              <p className="text-xs text-red-600">{fieldErrors.ma_long}</p>
+            )}
           </div>
 
           <p className="text-xs text-ink/50 sm:col-span-2">
             修改均线参数后需重新「同步行情」才会重算入库指标。
           </p>
+          {(fieldErrors.ma_range || fieldErrors._form) && (
+            <p className="text-xs text-red-600 sm:col-span-2">
+              {fieldErrors.ma_range || fieldErrors._form}
+            </p>
+          )}
 
           <label className="flex min-h-11 items-center gap-3 text-sm sm:col-span-2">
             <input
@@ -299,6 +379,10 @@ export default function SettingsPage() {
                   min={50}
                   max={99}
                   step={1}
+                  aria-invalid={Boolean(
+                    fieldErrors.valuation_reduce_percentile ||
+                      fieldErrors.valuation_range
+                  )}
                   className="h-11 bg-white"
                   value={Math.round(settings.valuation_reduce_percentile * 100)}
                   onChange={(e) =>
@@ -311,6 +395,11 @@ export default function SettingsPage() {
                 <p className="text-xs text-ink/45">
                   全局唯一武装线（覆盖所有标的）；默认 80%
                 </p>
+                {fieldErrors.valuation_reduce_percentile && (
+                  <p className="text-xs text-red-600">
+                    {fieldErrors.valuation_reduce_percentile}
+                  </p>
+                )}
               </div>
               <div className="space-y-1.5">
                 <Label htmlFor="val-exit">估值清仓线（PE 复合分位 %）</Label>
@@ -320,6 +409,10 @@ export default function SettingsPage() {
                   min={80}
                   max={100}
                   step={1}
+                  aria-invalid={Boolean(
+                    fieldErrors.valuation_exit_percentile ||
+                      fieldErrors.valuation_range
+                  )}
                   className="h-11 bg-white"
                   value={Math.round(settings.valuation_exit_percentile * 100)}
                   onChange={(e) =>
@@ -333,7 +426,17 @@ export default function SettingsPage() {
                   全局唯一清仓线；默认 90%。回撤幅度按角色模板（核心
                   10% / 成长 8%），不在此页配置
                 </p>
+                {fieldErrors.valuation_exit_percentile && (
+                  <p className="text-xs text-red-600">
+                    {fieldErrors.valuation_exit_percentile}
+                  </p>
+                )}
               </div>
+              {fieldErrors.valuation_range && (
+                <p className="text-xs text-red-600 sm:col-span-2">
+                  {fieldErrors.valuation_range}
+                </p>
+              )}
             </>
           )}
 
@@ -357,6 +460,10 @@ export default function SettingsPage() {
                 step="0.01"
                 min={0}
                 max={1}
+                aria-invalid={Boolean(
+                  fieldErrors[`target_weights.${s.id}`] ||
+                    fieldErrors.target_weights
+                )}
                 className="h-11 bg-white"
                 value={weights[s.id] ?? s.target_weight}
                 onChange={(e) =>
@@ -369,9 +476,19 @@ export default function SettingsPage() {
                   })
                 }
               />
+              {fieldErrors[`target_weights.${s.id}`] && (
+                <p className="text-xs text-red-600">
+                  {fieldErrors[`target_weights.${s.id}`]}
+                </p>
+              )}
             </div>
           ))}
         </div>
+        {fieldErrors.target_weights && (
+          <p className="mt-2 text-xs text-red-600">
+            {fieldErrors.target_weights}
+          </p>
+        )}
       </section>
 
       <section className="mt-6 rounded-xl border border-ink/10 bg-white/70 p-4 sm:p-5">
@@ -400,6 +517,9 @@ export default function SettingsPage() {
                   <Input
                     id={`shares-${h.symbol}`}
                     type="number"
+                    min={0}
+                    max={1000000000000}
+                    aria-invalid={Boolean(fieldErrors[`holdings.${idx}.shares`])}
                     className="h-11 bg-white"
                     value={h.shares}
                     onChange={(e) => {
@@ -408,12 +528,22 @@ export default function SettingsPage() {
                       setPortfolio({ ...portfolio, holdings: next });
                     }}
                   />
+                  {fieldErrors[`holdings.${idx}.shares`] && (
+                    <p className="text-xs text-red-600">
+                      {fieldErrors[`holdings.${idx}.shares`]}
+                    </p>
+                  )}
                 </div>
                 <div className="space-y-1.5">
                   <Label htmlFor={`cost-${h.symbol}`}>成本价</Label>
                   <Input
                     id={`cost-${h.symbol}`}
                     type="number"
+                    min={0}
+                    max={10000000}
+                    aria-invalid={Boolean(
+                      fieldErrors[`holdings.${idx}.cost_price`]
+                    )}
                     className="h-11 bg-white"
                     value={h.cost_price}
                     onChange={(e) => {
@@ -422,12 +552,22 @@ export default function SettingsPage() {
                       setPortfolio({ ...portfolio, holdings: next });
                     }}
                   />
+                  {fieldErrors[`holdings.${idx}.cost_price`] && (
+                    <p className="text-xs text-red-600">
+                      {fieldErrors[`holdings.${idx}.cost_price`]}
+                    </p>
+                  )}
                 </div>
                 <div className="space-y-1.5">
                   <Label htmlFor={`mv-${h.symbol}`}>市值（可选）</Label>
                   <Input
                     id={`mv-${h.symbol}`}
                     type="number"
+                    min={0}
+                    max={1000000000000}
+                    aria-invalid={Boolean(
+                      fieldErrors[`holdings.${idx}.market_value`]
+                    )}
                     className="h-11 bg-white"
                     value={h.market_value ?? ""}
                     onChange={(e) => {
@@ -440,6 +580,11 @@ export default function SettingsPage() {
                       setPortfolio({ ...portfolio, holdings: next });
                     }}
                   />
+                  {fieldErrors[`holdings.${idx}.market_value`] && (
+                    <p className="text-xs text-red-600">
+                      {fieldErrors[`holdings.${idx}.market_value`]}
+                    </p>
+                  )}
                 </div>
                 <div className="space-y-1.5">
                   <Label htmlFor={`tp-${h.symbol}`}>已执行止盈阶段</Label>
