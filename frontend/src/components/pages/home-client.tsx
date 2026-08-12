@@ -22,8 +22,19 @@ function ActionBadge({ action }: { action: Action }) {
   );
 }
 
+function strategyBrief(item: EnsembleItem, key: string): string | null {
+  const s = item.strategies.find((x) => x.strategy === key);
+  if (!s) return null;
+  const label = STRATEGY_LABELS[s.strategy] || s.strategy;
+  return `${label} ×${s.multiplier.toFixed(2)}`;
+}
+
 function OperationCard({ item }: { item: EnsembleItem }) {
   const [open, setOpen] = useState(false);
+  const valuation = strategyBrief(item, "valuation");
+  const trend = strategyBrief(item, "trend");
+  const profit = strategyBrief(item, "profit_taking");
+
   return (
     <article className="rounded-xl border border-ink/10 bg-white/70 p-4 shadow-sm backdrop-blur sm:p-5">
       <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between">
@@ -75,13 +86,25 @@ function OperationCard({ item }: { item: EnsembleItem }) {
           )}
         </div>
       </div>
-      <p className="mt-3 text-sm leading-relaxed text-ink/75">{item.reason}</p>
+
+      <div className="mt-3 rounded-lg border border-ink/8 bg-paper/70 px-3 py-2.5">
+        <p className="text-xs font-medium uppercase tracking-wider text-ink/45">
+          合成依据
+        </p>
+        <p className="mt-1 text-sm leading-relaxed text-ink/80">{item.reason}</p>
+        <p className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-ink/55">
+          {valuation && <span>{valuation}</span>}
+          {trend && <span>{trend}</span>}
+          {profit && <span>{profit}</span>}
+        </p>
+      </div>
+
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
         className="mt-4 min-h-11 text-sm font-medium text-steel hover:underline"
       >
-        {open ? "收起策略明细" : "展开估值、趋势与止盈明细"}
+        {open ? "收起策略明细" : "展开估值、均线与止盈完整依据"}
       </button>
       {open && (
         <ul className="mt-3 grid gap-2 sm:grid-cols-2">
@@ -98,7 +121,7 @@ function OperationCard({ item }: { item: EnsembleItem }) {
                   ×{s.multiplier.toFixed(2)} · {actionLabel(s.action)}
                 </span>
               </div>
-              <p className="text-ink/65">{s.reason}</p>
+              <p className="leading-relaxed text-ink/65">{s.reason}</p>
             </li>
           ))}
         </ul>
