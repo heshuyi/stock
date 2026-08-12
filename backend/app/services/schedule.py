@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from math import floor
 from typing import Iterable
 
+import exchange_calendars as xcals
+
 from app.models import BuyFrequency
+
+
+class TradingCalendarUnavailable(RuntimeError):
+    """Raised when the official XSHG calendar cannot serve a requested range."""
 
 
 def _as_dates(trading_days: Iterable[str | date]) -> list[date]:
@@ -16,6 +23,26 @@ def _as_dates(trading_days: Iterable[str | date]) -> list[date]:
         else:
             out.append(date.fromisoformat(str(d)[:10]))
     return sorted(set(out))
+
+
+def xshg_sessions(start: date, end: date) -> list[date]:
+    """Return official Shanghai sessions; never synthesize weekday sessions."""
+    if end < start:
+        return []
+    try:
+        calendar = xcals.get_calendar("XSHG")
+        bounded_start = max(start, calendar.first_session.date())
+        bounded_end = min(end, calendar.last_session.date())
+        if bounded_end < bounded_start:
+            return []
+        return [
+            timestamp.date()
+            for timestamp in calendar.sessions_in_range(bounded_start, bounded_end)
+        ]
+    except Exception as exc:
+        raise TradingCalendarUnavailable(
+            f"XSHG 交易日历不可用：{start.isoformat()} 至 {end.isoformat()}"
+        ) from exc
 
 
 def _expected_prev_session(day: date) -> date:
@@ -45,16 +72,15 @@ def is_trading_session(
     today: date,
     latest_bar: date | None,
 ) -> bool:
-    """True if `day` is a known session, or today with warehouse already at T-1."""
-    if day in warehouse:
+    """True for an official session whose previous close is available."""
+    if day not in warehouse:
+        return False
+    if day != today:
         return True
-    if day != today or day.weekday() >= 5 or latest_bar is None:
+    if latest_bar is None:
         return False
-    if latest_bar < _expected_prev_session(day):
-        return False
-    if _gap_has_missing_sessions(latest_bar, day, warehouse):
-        return False
-    return True
+    previous = max((session for session in warehouse if session < day), default=None)
+    return previous is None or latest_bar >= previous
 
 
 def execution_calendar(
@@ -62,14 +88,12 @@ def execution_calendar(
     *,
     today: date,
     latest_bar: date | None,
+    until: date | None = None,
 ) -> list[date]:
-    """Sessions for execution checks and period_amount — warehouse + maybe today."""
-    days = _as_dates(warehouse_days)
-    known = set(days)
-    if is_trading_session(today, known, today=today, latest_bar=latest_bar):
-        if today not in known:
-            days.append(today)
-    return sorted(set(days))
+    """Official XSHG sessions for execution checks and forward planning."""
+    del warehouse_days, latest_bar
+    start = date(today.year - 1, 1, 1)
+    return xshg_sessions(start, until or today)
 
 
 def planning_calendar(
@@ -79,16 +103,13 @@ def planning_calendar(
     latest_bar: date | None,
     until: date,
 ) -> list[date]:
-    """Deprecated: adds naive weekday placeholders. Prefer next_execution_date()."""
-    days = execution_calendar(warehouse_days, today=today, latest_bar=latest_bar)
-    start = (days[-1] + timedelta(days=1)) if days else today
-    known = set(days)
-    cursor = max(start, today)
-    while cursor <= until:
-        if cursor.isoweekday() <= 5 and cursor not in known:
-            days.append(cursor)
-        cursor += timedelta(days=1)
-    return sorted(set(days))
+    """Deprecated compatibility wrapper over the official XSHG calendar."""
+    return execution_calendar(
+        warehouse_days,
+        today=today,
+        latest_bar=latest_bar,
+        until=until,
+    )
 
 
 def _would_be_execution_day(
@@ -128,16 +149,25 @@ def period_amount(
     month: int,
     trading_days: Iterable[str | date],
 ) -> float:
-    """Convert monthly budget into per-period baseline amount."""
+    """Convert a monthly budget into a cent-safe per-period allocation."""
     days = _as_dates(trading_days)
+    month_days = trading_days_in_month(days, year, month)
+    if not month_days:
+        raise TradingCalendarUnavailable(
+            f"XSHG 缺少 {year:04d}-{month:02d} 的完整交易日"
+        )
     if frequency == "monthly":
         return round(float(base_amount), 2)
     if frequency == "daily":
-        n = len(trading_days_in_month(days, year, month)) or 20
-        return round(float(base_amount) / n, 2)
-    # weekly
-    w = weeks_with_trading_in_month(days, year, month)
-    return round(float(base_amount) / w, 2)
+        periods = len(month_days)
+    else:
+        periods = weeks_with_trading_in_month(days, year, month)
+    if periods <= 0:
+        raise TradingCalendarUnavailable(
+            f"XSHG 缺少 {year:04d}-{month:02d} 的完整交易日"
+        )
+    # Floor instead of round so repeated allocations never exceed the budget.
+    return floor(float(base_amount) * 100 / periods) / 100
 
 
 def resolve_weekly_execution(
@@ -241,49 +271,24 @@ def next_execution_date(
     latest_bar: date | None = None,
     look_ahead_days: int = 400,
 ) -> str | None:
-    """Next DCA execution: warehouse sessions first, then schedule estimate."""
+    """Return the next official XSHG execution date, strictly after `today`."""
     wh = _as_dates(warehouse_days if warehouse_days is not None else (trading_days or []))
-    if not wh and trading_days:
-        wh = _as_dates(trading_days)
-    exec_cal = execution_calendar(wh, today=today, latest_bar=latest_bar)
-    wh_set = set(wh)
     end = today + timedelta(days=look_ahead_days)
-
-    for d in exec_cal:
-        if d < today or d > end:
+    exec_cal = execution_calendar(
+        wh,
+        today=today,
+        latest_bar=latest_bar,
+        until=end,
+    )
+    for session in exec_cal:
+        if session <= today:
             continue
-        if is_execution_day(
-            d,
+        if _would_be_execution_day(
+            session,
             frequency,
             weekly_weekday=weekly_weekday,
             monthly_day=monthly_day,
-            trading_days=exec_cal,
-            latest_bar=latest_bar,
+            schedule_days=exec_cal,
         ):
-            return d.isoformat()
-
-    # Estimate: next calendar slot that matches frequency (may precede bar sync).
-    cursor = today + timedelta(days=1)
-    while cursor <= end:
-        if cursor.weekday() >= 5:
-            cursor += timedelta(days=1)
-            continue
-        hypo = sorted(set(exec_cal + [cursor]))
-        if not _would_be_execution_day(
-            cursor,
-            frequency,
-            weekly_weekday=weekly_weekday,
-            monthly_day=monthly_day,
-            schedule_days=hypo,
-        ):
-            cursor += timedelta(days=1)
-            continue
-        if (
-            latest_bar
-            and cursor <= today
-            and _gap_has_missing_sessions(latest_bar, cursor, wh_set)
-        ):
-            cursor += timedelta(days=1)
-            continue
-        return cursor.isoformat()
+            return session.isoformat()
     return None
