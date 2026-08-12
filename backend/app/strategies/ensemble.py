@@ -26,7 +26,12 @@ def ensemble(
     profile: StrategyProfile | None = None,
     max_mult: float = 2.0,
 ) -> EnsembleResult:
-    """Weighted valuation/trend merge with role-aware hard-veto / unlock."""
+    """Merge valuation + trend with weighted average (not multiplication).
+
+    Product rule: valuation sets the primary DCA size; trend only soft-scales.
+    Hard veto (valuation pause / growth bear) zeroes the buy — do not encode
+    veto as ``m_val * m_trend``. Profit-taking stays out of the buy weights.
+    """
     profile = profile or StrategyProfile()
     wmap = weights or profile.strategy_weights or STRATEGY_WEIGHTS
     by_name = {s.strategy: s for s in signals}
@@ -82,12 +87,13 @@ def ensemble(
                 continue
             numer += w * s.multiplier
             denom += w
+        # Explicit weighted average — never m_val * m_trend for buy sizing.
         final_mult = _clip(numer / denom if denom else 0.0, 0.0, max_mult)
 
         if any_reduce and max_reduce:
             action = "reduce"
             reason = (
-                f"加权合成倍数 {final_mult:.2f}；同时建议减仓 "
+                f"加权平均合成 {final_mult:.2f}；同时建议减仓 "
                 f"{max_reduce:.0%}"
             )
         elif final_mult <= 1e-9:
@@ -102,7 +108,9 @@ def ensemble(
                 for s in signals
                 if float(wmap.get(s.strategy, 0.0)) > 0
             ]
-            reason = f"加权合成 {final_mult:.2f}（{' + '.join(parts)}）"
+            reason = (
+                f"加权平均合成 {final_mult:.2f}（非相乘；{' + '.join(parts)}）"
+            )
 
     amount = (
         round(base_amount * target_weight * final_mult, 2)
