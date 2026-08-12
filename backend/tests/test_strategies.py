@@ -282,6 +282,53 @@ def test_core_bear_not_hard_veto():
     assert result.amount > 0
 
 
+def test_ensemble_uses_weighted_average_not_product():
+    """低估加码 + 夹层降频：加权平均应明显高于相乘，避免核心仓加码被抹平。"""
+    signals = [
+        StrategySignal(
+            strategy="valuation",
+            symbol="HS300",
+            action="buy",
+            multiplier=1.8,
+            confidence=0.9,
+            reason="低估",
+        ),
+        StrategySignal(
+            strategy="trend",
+            symbol="HS300",
+            action="buy",
+            multiplier=0.55,
+            confidence=0.85,
+            reason="夹层",
+        ),
+        StrategySignal(
+            strategy="profit_taking",
+            symbol="HS300",
+            action="hold",
+            multiplier=1.0,
+            confidence=0.7,
+            reason="未触发",
+        ),
+    ]
+    result = ensemble(
+        symbol="HS300",
+        name="沪深300",
+        etf_code="510300",
+        target_weight=0.35,
+        signals=signals,
+        base_amount=10000,
+        hard_veto_enabled=True,
+        profile=CORE,
+        weights=CORE.strategy_weights,
+    )
+    expected = 0.7 * 1.8 + 0.3 * 0.55  # 1.425
+    product = 1.8 * 0.55  # 0.99
+    assert abs(result.multiplier - expected) < 1e-9
+    assert result.multiplier > product
+    assert "加权平均" in result.reason
+    assert "非相乘" in result.reason
+
+
 def test_oversold_unlock_bypasses_hard_veto():
     signals = [
         valuation_signal("CYB200", 0.1, 0.1, profile=GROWTH),
