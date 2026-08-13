@@ -10,7 +10,7 @@ import sqlite3
 import base64
 import json
 from contextlib import contextmanager
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -195,7 +195,7 @@ def purge_symbols_not_in(active_ids: set[str] | list[str]) -> list[dict[str, Any
 def upsert_records(symbol: str, records: list[dict[str, Any]]) -> int:
     if not records:
         return 0
-    now = datetime.utcnow().isoformat() + "Z"
+    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     rows = [
         (
             symbol,
@@ -366,7 +366,7 @@ def upsert_valuation_observations(
     """Persist raw valuation observations without overwriting other providers."""
     if not records:
         return 0
-    now = datetime.utcnow().isoformat() + "Z"
+    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     rows = [
         (
             symbol,
@@ -573,7 +573,7 @@ def ensure_month_plan(symbol: str, start_ym: str = "1991-01") -> int:
     """Create pending month slots from start_ym through current month."""
     start = date.fromisoformat(f"{start_ym}-01")
     end = date.today()
-    now = datetime.utcnow().isoformat() + "Z"
+    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     created = 0
     with connect() as conn:
         for ym in month_range(start, end):
@@ -619,7 +619,7 @@ def next_pending_month(symbol: str | None = None) -> tuple[str, str] | None:
 
 
 def mark_month(symbol: str, year_month: str, status: str, rows: int = 0, error: str | None = None) -> None:
-    now = datetime.utcnow().isoformat() + "Z"
+    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     with connect() as conn:
         conn.execute(
             """

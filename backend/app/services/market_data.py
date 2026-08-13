@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import os
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -1146,7 +1146,7 @@ async def sync_all(
     ) and not any(r.get("source") == "error" for r in results)
 
     return {
-        "synced_at": datetime.utcnow().isoformat() + "Z",
+        "synced_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "results": results,
         "purged": purged,
         "warning": warning,
