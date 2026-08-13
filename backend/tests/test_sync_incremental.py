@@ -70,6 +70,8 @@ def test_warehouse_is_fresh_when_latest_covers_calendar_t1(monkeypatch, tmp_path
                 "close": 4500,
                 "ma_short": 4600,
                 "ma_long": 4700,
+                "valuation_asof": "2026-08-05",
+                "valuation_source": "akshare-legulegu",
                 "source": "akshare",
             }
         ],
@@ -117,6 +119,8 @@ def test_sync_symbol_skips_network_when_fresh(monkeypatch, tmp_path):
                 "close": 4500,
                 "ma_short": 4600,
                 "ma_long": 4700,
+                "valuation_asof": "2026-08-05",
+                "valuation_source": "akshare-legulegu",
                 "source": "akshare",
             }
         ],
@@ -135,6 +139,52 @@ def test_sync_symbol_skips_network_when_fresh(monkeypatch, tmp_path):
     assert result["mode"] == "skipped"
     assert result["rows_added"] == 0
     assert result["latest_date"] == "2026-08-05"
+
+
+def test_price_fresh_stale_valuation_refreshes_instead_of_skipping(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "market.db"
+    monkeypatch.setattr(market_store, "get_db_path", lambda: db_path)
+    market_store._READY_PATH = None
+    monkeypatch.setattr(
+        market_store, "expected_trading_t1", lambda today=None: date(2026, 8, 5)
+    )
+    market_store.upsert_records(
+        "HS300",
+        [
+            {
+                "date": "2026-08-05",
+                "close": 4500,
+                "ma_short": 4600,
+                "ma_long": 4700,
+                "valuation_asof": "2026-07-20",
+                "valuation_source": "akshare-legulegu",
+                "source": "akshare",
+            }
+        ],
+    )
+    refreshed = {"count": 0}
+
+    def fake_refresh(symbol, ma_short, ma_long):
+        refreshed["count"] += 1
+        assert symbol.id == "HS300"
+        assert ma_short > 0 and ma_long > 0
+        return "akshare-legulegu"
+
+    monkeypatch.setattr(
+        "app.services.market_data._refresh_valuation_only", fake_refresh
+    )
+    monkeypatch.setattr(
+        "app.services.market_data.mirror_latest_to_mongo",
+        lambda *_a, **_k: asyncio.sleep(0),
+    )
+
+    result = asyncio.run(sync_symbol(_sym(), use_mock=False, force=False))
+    assert refreshed["count"] == 1
+    assert result["mode"] == "incremental"
+    assert result["mode"] != "skipped"
+    assert result["valuation_source"] == "akshare-legulegu"
 
 
 def test_sync_symbol_incremental_appends_missing_only(monkeypatch, tmp_path):

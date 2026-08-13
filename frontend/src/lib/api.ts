@@ -52,6 +52,12 @@ export interface SymbolInfo {
   valuation_enabled: boolean;
   valuation_proxy: boolean;
   valuation_proxy_label?: string | null;
+  strategy_profile?: {
+    valuation_mode?: "pe" | "pe_pb_composite";
+    pe_weight?: number;
+    pb_weight?: number;
+    percentile_window?: "5y" | "full";
+  };
 }
 
 export interface Holding {
@@ -81,12 +87,21 @@ export interface UserSettings {
   weekly_weekday: number;
   monthly_day: number;
   profit_take_enabled: boolean;
-  /** @deprecated 账户收益率触发已停用，保留字段仅为兼容旧数据 */
-  profit_take_return: number;
+  cash_pool_enabled: boolean;
   /** 全局止盈：估值武装分位（0–1），覆盖各标的 profile 的 trail_arm */
   valuation_reduce_percentile: number;
   /** 全局止盈：估值清仓分位（0–1），覆盖各标的 profile 的 trail_exit */
   valuation_exit_percentile: number;
+}
+
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public readonly fieldErrors: Record<string, string> = {}
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
 }
 
 export interface MarketPoint {
@@ -95,8 +110,12 @@ export interface MarketPoint {
   ma_short?: number | null;
   ma_long?: number | null;
   drawdown?: number | null;
+  pe?: number | null;
+  pb?: number | null;
   pe_percentile?: number | null;
   pb_percentile?: number | null;
+  valuation_asof?: string | null;
+  valuation_source?: string | null;
 }
 
 export interface DatabaseSymbolStats {
@@ -110,6 +129,10 @@ export interface DatabaseSymbolStats {
   missing_etf_close: number;
   missing_pe: number;
   missing_pb: number;
+  valuation_asof?: string | null;
+  valuation_sources?: string | null;
+  valuation_lag_sessions?: number | null;
+  valuation_fresh?: boolean;
 }
 
 export interface DatabaseOverview {
@@ -128,6 +151,11 @@ export interface DatabaseOverview {
     missing_pe: number;
     missing_pb: number;
     missing_ma_long: number;
+    price_completeness_pct: number;
+    valuation_completeness_pct: number;
+    valuation_freshness_pct: number;
+    etf_completeness_pct: number;
+    /** Legacy blend retained for API compatibility. */
     quality_score: number;
   };
   symbols: DatabaseSymbolStats[];
@@ -165,6 +193,8 @@ export interface DatabaseRow {
   pb: number | null;
   pe_percentile: number | null;
   pb_percentile: number | null;
+  valuation_asof: string | null;
+  valuation_source: string | null;
   source: string | null;
   updated_at: string | null;
 }
@@ -232,9 +262,28 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       text.trimStart().startsWith("<!") ||
       /internal server error/i.test(text);
     try {
-      const body = JSON.parse(text) as { detail?: unknown };
+      const body = JSON.parse(text) as {
+        detail?:
+          | string
+          | Array<{ loc?: Array<string | number>; msg?: string }>;
+      };
       if (typeof body.detail === "string") {
         throw new Error(body.detail);
+      }
+      if (Array.isArray(body.detail)) {
+        const fieldErrors: Record<string, string> = {};
+        for (const issue of body.detail) {
+          const path = (issue.loc || [])
+            .filter((part) => part !== "body")
+            .map(String)
+            .join(".");
+          const message = (issue.msg || "输入无效").replace(/^Value error,\s*/, "");
+          fieldErrors[path || "_form"] = message;
+        }
+        throw new ApiError(
+          Object.values(fieldErrors).join("；") || "输入参数无效",
+          fieldErrors
+        );
       }
       if (body.detail != null) {
         throw new Error(JSON.stringify(body.detail));

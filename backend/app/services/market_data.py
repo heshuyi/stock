@@ -15,9 +15,11 @@ from app.config import get_settings
 from app.db import get_db, load_app_config
 from app.models import SymbolConfig
 from app.services import market_store
+from app.services.schedule import xshg_sessions
 
-VALUATION_WINDOW_DAYS = 5 * 252
-FULL_VALUATION_WINDOW_DAYS = 100 * 365
+VALUATION_WINDOW_YEARS = 5
+FULL_VALUATION_WINDOW_YEARS = 100
+MAX_VALUATION_LAG_SESSIONS = 5
 FREE_VALUATION_SYMBOLS = {"HS300", "ZZ500", "CYB200", "KCB50", "SZ50"}
 # Default 1: parallel akshare + py_mini_racer can native-abort the process.
 SYNC_CONCURRENCY = int(os.environ.get("STOCK_SYNC_CONCURRENCY", "1"))
@@ -50,11 +52,33 @@ def warehouse_is_fresh(symbol_id: str, *, force: bool = False) -> dict[str, Any]
     }
 
 
-def valuation_window_days_for(symbol: SymbolConfig) -> int:
+def valuation_window_years_for(symbol: SymbolConfig) -> int:
     window = getattr(symbol.strategy_profile, "percentile_window", "5y")
     if window == "full":
-        return FULL_VALUATION_WINDOW_DAYS
-    return VALUATION_WINDOW_DAYS
+        return FULL_VALUATION_WINDOW_YEARS
+    return VALUATION_WINDOW_YEARS
+
+
+def valuation_lag_sessions(
+    valuation_asof: str | date | None,
+    signal_date: str | date | None,
+) -> int | None:
+    """Count XSHG sessions strictly after valuation_asof through signal_date."""
+    if not valuation_asof or not signal_date:
+        return None
+    observed = (
+        valuation_asof
+        if isinstance(valuation_asof, date)
+        else date.fromisoformat(str(valuation_asof)[:10])
+    )
+    signal = (
+        signal_date
+        if isinstance(signal_date, date)
+        else date.fromisoformat(str(signal_date)[:10])
+    )
+    if observed >= signal:
+        return 0
+    return len(xshg_sessions(observed + timedelta(days=1), signal))
 
 
 def generate_mock_history(symbol: SymbolConfig, days: int = 800) -> pd.DataFrame:
@@ -232,28 +256,41 @@ def apply_valuation_asof(
     df: pd.DataFrame,
     pe_df: pd.DataFrame | None,
     pb_df: pd.DataFrame | None,
+    valuation_source: str | None = None,
 ) -> pd.DataFrame:
-    """Attach PE/PB with backward as-of fill so monthly proxies cover daily bars."""
-    out = df.sort_values("date").copy()
+    """Attach PE/PB and the matched observation date by backward as-of fill."""
+    out = df.sort_values("date").reset_index(drop=True).copy()
     out["_dt"] = pd.to_datetime(out["date"])
 
-    def _asof_col(source: pd.DataFrame | None, col: str) -> pd.Series:
+    def _asof_col(
+        source: pd.DataFrame | None, col: str
+    ) -> tuple[pd.Series, pd.Series]:
         if source is None or source.empty or col not in source.columns:
-            return pd.Series(np.nan, index=out.index)
+            return (
+                pd.Series(np.nan, index=out.index),
+                pd.Series(pd.NaT, index=out.index, dtype="datetime64[ns]"),
+            )
         hist = source.dropna(subset=[col]).sort_values("date").copy()
         if hist.empty:
-            return pd.Series(np.nan, index=out.index)
-        hist["_dt"] = pd.to_datetime(hist["date"])
+            return (
+                pd.Series(np.nan, index=out.index),
+                pd.Series(pd.NaT, index=out.index, dtype="datetime64[ns]"),
+            )
+        hist["_valuation_dt"] = pd.to_datetime(hist["date"])
         merged = pd.merge_asof(
             out[["_dt"]],
-            hist[["_dt", col]],
-            on="_dt",
+            hist[["_valuation_dt", col]],
+            left_on="_dt",
+            right_on="_valuation_dt",
             direction="backward",
         )
-        return merged[col]
+        return merged[col], merged["_valuation_dt"]
 
-    out["pe"] = _asof_col(pe_df, "pe")
-    out["pb"] = _asof_col(pb_df, "pb")
+    out["pe"], pe_asof = _asof_col(pe_df, "pe")
+    out["pb"], pb_asof = _asof_col(pb_df, "pb")
+    out["valuation_asof"] = pd.concat([pe_asof, pb_asof], axis=1).min(axis=1)
+    out["valuation_asof"] = out["valuation_asof"].dt.date
+    out["valuation_source"] = valuation_source
     return out.drop(columns=["_dt"])
 
 
@@ -262,7 +299,7 @@ def _percentile_against_history(
     values: np.ndarray,
     history: pd.DataFrame | None,
     value_col: str,
-    window_days: int = VALUATION_WINDOW_DAYS,
+    window_years: int = VALUATION_WINDOW_YEARS,
 ) -> list[float]:
     """Rank each value against the provider history ending on that date."""
     if history is None or history.empty or value_col not in history.columns:
@@ -275,17 +312,19 @@ def _percentile_against_history(
     hist_dates = pd.to_datetime(hist["date"]).to_numpy(dtype="datetime64[ns]")
     hist_vals = hist[value_col].to_numpy(dtype=float)
     out: list[float] = []
-    window = np.timedelta64(window_days, "D")
     for raw_date, value in zip(dates, values):
         if value is None or (isinstance(value, float) and np.isnan(value)):
             out.append(float("nan"))
             continue
-        end = np.datetime64(pd.Timestamp(raw_date).to_datetime64())
-        start = end - window
+        end_ts = pd.Timestamp(raw_date)
+        end = np.datetime64(end_ts.to_datetime64())
+        start = np.datetime64(
+            (end_ts - pd.DateOffset(years=window_years)).to_datetime64()
+        )
         mask = (hist_dates >= start) & (hist_dates <= end)
         window_vals = hist_vals[mask]
         if len(window_vals) < 5:
-            out.append(0.5)
+            out.append(float("nan"))
         else:
             out.append(float((window_vals <= float(value)).mean()))
     return out
@@ -375,8 +414,23 @@ def fetch_akshare_index(
         else:
             df["pe"] = np.nan
             df["pb"] = np.nan
+            df["valuation_asof"] = None
+            df["valuation_source"] = None
         return (
-            df[["date", "open", "high", "low", "close", "volume", "pe", "pb"]],
+            df[
+                [
+                    "date",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                    "pe",
+                    "pb",
+                    "valuation_asof",
+                    "valuation_source",
+                ]
+            ],
             pe_df,
             pb_df,
         )
@@ -391,7 +445,7 @@ def enrich_indicators(
     ma_long: int = 120,
     pe_history: pd.DataFrame | None = None,
     pb_history: pd.DataFrame | None = None,
-    valuation_window_days: int = VALUATION_WINDOW_DAYS,
+    valuation_window_years: int = VALUATION_WINDOW_YEARS,
 ) -> pd.DataFrame:
     out = df.copy()
     out["ma_short"] = out["close"].rolling(
@@ -411,24 +465,16 @@ def enrich_indicators(
             out["pe"].to_numpy(dtype=float),
             pe_history,
             "pe",
-            window_days=valuation_window_days,
+            window_years=valuation_window_years,
         )
     else:
-        window = min(len(out), valuation_window_days)
-        arr = out["pe"].to_numpy(dtype=float)
-        vals = []
-        for i in range(len(arr)):
-            if np.isnan(arr[i]):
-                vals.append(np.nan)
-                continue
-            start = max(0, i - window + 1)
-            hist = arr[start : i + 1]
-            hist = hist[~np.isnan(hist)]
-            if len(hist) < 5:
-                vals.append(0.5)
-            else:
-                vals.append(float((hist <= hist[-1]).mean()))
-        out["pe_percentile"] = vals
+        out["pe_percentile"] = _percentile_against_history(
+            dates,
+            out["pe"].to_numpy(dtype=float),
+            out[["date", "pe"]],
+            "pe",
+            window_years=valuation_window_years,
+        )
 
     if pb_history is not None and not pb_history.empty:
         out["pb_percentile"] = _percentile_against_history(
@@ -436,24 +482,16 @@ def enrich_indicators(
             out["pb"].to_numpy(dtype=float),
             pb_history,
             "pb",
-            window_days=valuation_window_days,
+            window_years=valuation_window_years,
         )
     else:
-        window = min(len(out), valuation_window_days)
-        arr = out["pb"].to_numpy(dtype=float)
-        vals = []
-        for i in range(len(arr)):
-            if np.isnan(arr[i]):
-                vals.append(np.nan)
-                continue
-            start = max(0, i - window + 1)
-            hist = arr[start : i + 1]
-            hist = hist[~np.isnan(hist)]
-            if len(hist) < 5:
-                vals.append(0.5)
-            else:
-                vals.append(float((hist <= hist[-1]).mean()))
-        out["pb_percentile"] = vals
+        out["pb_percentile"] = _percentile_against_history(
+            dates,
+            out["pb"].to_numpy(dtype=float),
+            out[["date", "pb"]],
+            "pb",
+            window_years=valuation_window_years,
+        )
     return out
 
 
@@ -464,6 +502,12 @@ def _f(v: Any) -> float | None:
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+def _date_str(v: Any) -> str | None:
+    if v is None or pd.isna(v):
+        return None
+    return pd.Timestamp(v).date().isoformat()
 
 
 def df_to_records(symbol_id: str, df: pd.DataFrame, source: str) -> list[dict[str, Any]]:
@@ -491,6 +535,8 @@ def df_to_records(symbol_id: str, df: pd.DataFrame, source: str) -> list[dict[st
                 "pb": _f(row.get("pb")),
                 "pe_percentile": _f(row.get("pe_percentile")),
                 "pb_percentile": _f(row.get("pb_percentile")),
+                "valuation_asof": _date_str(row.get("valuation_asof")),
+                "valuation_source": row.get("valuation_source"),
                 "source": source,
             }
         )
@@ -517,6 +563,8 @@ async def mirror_latest_to_mongo(symbol_id: str, record: dict[str, Any]) -> None
                     "ma_long",
                     "high_1y",
                     "drawdown",
+                    "valuation_asof",
+                    "valuation_source",
                     "source",
                 )
             }
@@ -533,7 +581,9 @@ async def mirror_latest_to_mongo(symbol_id: str, record: dict[str, Any]) -> None
                 "pb": record.get("pb"),
                 "pe_percentile": record.get("pe_percentile"),
                 "pb_percentile": record.get("pb_percentile"),
-                "source": record.get("source"),
+                "valuation_asof": record.get("valuation_asof"),
+                "valuation_source": record.get("valuation_source"),
+                "source": record.get("valuation_source") or record.get("source"),
             }
         },
         upsert=True,
@@ -640,6 +690,82 @@ def _persist_valuations(
     market_store.materialize_valuation_metrics(symbol.id, records)
 
 
+def _valuation_source_for(
+    symbol: SymbolConfig,
+    pe_history: pd.DataFrame | None,
+    pb_history: pd.DataFrame | None,
+) -> str | None:
+    has_history = (
+        (pe_history is not None and not pe_history.empty)
+        or (pb_history is not None and not pb_history.empty)
+    )
+    if not has_history:
+        return None
+    return (
+        "akshare-legulegu-market-proxy"
+        if symbol.valuation_proxy
+        else "akshare-legulegu"
+    )
+
+
+def _refresh_valuation_only(
+    symbol: SymbolConfig,
+    ma_short: int,
+    ma_long: int,
+) -> str:
+    """Refresh valuation history and rematerialize bars without pulling prices."""
+    try:
+        import akshare as ak
+
+        pe_history, pb_history = fetch_akshare_valuations(ak, symbol)
+    except Exception:
+        pe_history = pb_history = None
+
+    valuation_source = _valuation_source_for(symbol, pe_history, pb_history)
+    if valuation_source is None and symbol.id in FREE_VALUATION_SYMBOLS:
+        legacy = load_legacy_free_valuations(symbol)
+        if legacy is not None:
+            pe_history = legacy[["date", "pe"]].dropna() if "pe" in legacy else None
+            pb_history = legacy[["date", "pb"]].dropna() if "pb" in legacy else None
+            valuation_source = "legacy-akshare-legulegu"
+    if valuation_source is None:
+        raise RuntimeError(f"估值刷新失败: {symbol.id} ({symbol.name})")
+
+    rows = market_store.load_records(symbol.id)
+    if not rows:
+        raise RuntimeError(f"估值刷新缺少行情底表: {symbol.id}")
+    frame = pd.DataFrame(rows)
+    frame["date"] = pd.to_datetime(frame["date"]).dt.date
+    frame = apply_valuation_asof(
+        frame.drop(
+            columns=["pe", "pb", "valuation_asof", "valuation_source"],
+            errors="ignore",
+        ),
+        pe_history,
+        pb_history,
+        valuation_source=valuation_source,
+    )
+    frame = enrich_indicators(
+        frame,
+        ma_short,
+        ma_long,
+        pe_history=pe_history,
+        pb_history=pb_history,
+        valuation_window_years=valuation_window_years_for(symbol),
+    )
+    source = str(frame.iloc[-1].get("source") or "akshare")
+    records = df_to_records(symbol.id, frame, source)
+    _persist_valuations(
+        symbol,
+        pe_history=pe_history,
+        pb_history=pb_history,
+        records=records,
+        valuation_source=valuation_source,
+        source=source,
+    )
+    return valuation_source
+
+
 def _sync_symbol_cpu(
     symbol: SymbolConfig,
     force_mock: bool,
@@ -662,6 +788,8 @@ def _sync_symbol_cpu(
         df = generate_mock_history(symbol, days=520)
         source = "mock"
         valuation_source = "mock"
+        df["valuation_asof"] = df["date"]
+        df["valuation_source"] = valuation_source
         pe_history = df[["date", "pe"]].dropna()
         pb_history = df[["date", "pb"]].dropna()
         df = enrich_indicators(
@@ -670,7 +798,7 @@ def _sync_symbol_cpu(
             ma_long,
             pe_history=pe_history,
             pb_history=pb_history,
-            valuation_window_days=valuation_window_days_for(symbol),
+            valuation_window_years=valuation_window_years_for(symbol),
         )
         records = df_to_records(symbol.id, df, source)
         market_store.upsert_records(symbol.id, records)
@@ -690,13 +818,24 @@ def _sync_symbol_cpu(
     bar_count = market_store.count_bars(symbol.id)
     min_seed = max(ma_long + 40, 180)
 
-    if (
+    price_fresh = bool(
         not force_full
         and latest
         and str(latest.get("date") or "") >= expected_t1
         and latest.get("ma_long") is not None
-    ):
+    )
+    latest_valuation_asof = latest.get("valuation_asof") if latest else None
+    valuation_lag = valuation_lag_sessions(latest_valuation_asof, expected_t1)
+    valuation_fresh = (
+        not symbol.valuation_enabled
+        or valuation_lag is not None
+        and valuation_lag <= MAX_VALUATION_LAG_SESSIONS
+    )
+    if price_fresh and valuation_fresh:
         return [], latest.get("source") or "warehouse", None, "skipped"
+    if price_fresh:
+        valuation_source = _refresh_valuation_only(symbol, ma_short, ma_long)
+        return [], latest.get("source") or "warehouse", valuation_source, "incremental"
 
     use_incremental = (
         not force_full
@@ -777,6 +916,7 @@ def _sync_symbol_cpu(
                         combined.drop(columns=["pe", "pb"], errors="ignore"),
                         pe_history,
                         pb_history,
+                        valuation_source=valuation_source,
                     )
 
                 combined = enrich_indicators(
@@ -785,7 +925,7 @@ def _sync_symbol_cpu(
                     ma_long,
                     pe_history=pe_history,
                     pb_history=pb_history,
-                    valuation_window_days=valuation_window_days_for(symbol),
+                    valuation_window_years=valuation_window_years_for(symbol),
                 )
                 # Only write newly fetched sessions (缺几个加几个).
                 to_write = combined[combined["date"] > warehouse_latest]
@@ -831,8 +971,11 @@ def _sync_symbol_cpu(
                 df.drop(columns=["pe", "pb"], errors="ignore"),
                 pe_history,
                 pb_history,
+                valuation_source="legacy-akshare-legulegu",
             )
             valuation_source = "legacy-akshare-legulegu"
+    if "valuation_source" in df.columns:
+        df["valuation_source"] = valuation_source
 
     etf = fetch_akshare_etf_history(symbol)
     if etf is not None:
@@ -844,7 +987,7 @@ def _sync_symbol_cpu(
         ma_long,
         pe_history=pe_history,
         pb_history=pb_history,
-        valuation_window_days=valuation_window_days_for(symbol),
+        valuation_window_years=valuation_window_years_for(symbol),
     )
     records = df_to_records(symbol.id, df, source)
     market_store.upsert_records(symbol.id, records)

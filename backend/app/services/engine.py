@@ -12,7 +12,11 @@ from app.db import (
     save_portfolio,
 )
 from app.models import DashboardResponse, EnsembleResult, Holding, Portfolio
-from app.services.market_data import get_signal_market, warm_latest_snapshots
+from app.services.market_data import (
+    get_signal_market,
+    valuation_lag_sessions,
+    warm_latest_snapshots,
+)
 from app.services import market_store
 from app.services.schedule import (
     execution_calendar,
@@ -38,7 +42,7 @@ def _holding_map(holdings: list[Holding]) -> dict[str, Holding]:
 
 
 def _strategy_state_changed(before: list[Holding], after: list[Holding]) -> bool:
-    """True when auto-derived trend/trailing fields differ (not shares/cost)."""
+    """True when auto-derived trend/profit-taking fields differ."""
     before_map = {h.symbol: h for h in before}
     for h in after:
         prev = before_map.get(h.symbol)
@@ -47,6 +51,8 @@ def _strategy_state_changed(before: list[Holding], after: list[Holding]) -> bool
                 return True
             continue
         if prev.trend_state != h.trend_state:
+            return True
+        if prev.take_profit_stage != h.take_profit_stage:
             return True
         if prev.trailing_armed != h.trailing_armed:
             return True
@@ -209,6 +215,7 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
         portfolio.cash,
         settings.base_amount,
         cfg.defaults.cash_reserve_months,
+        enabled=settings.cash_pool_enabled,
     )
     max_mult = 2.0 if pool_factor >= 1.0 else 1.8
     cap_ratio = 2.0 if pool_factor >= 1.0 else settings.normalize_buy_cap
@@ -216,6 +223,7 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
     items: list[EnsembleResult] = []
     updated_holdings: list[Holding] = []
     holdings_by_id = {h.symbol: h for h in portfolio.holdings}
+    valuation_issues: list[str] = []
 
     for sym in cfg.symbols:
         latest = latest_by_symbol.get(sym.id)
@@ -258,6 +266,13 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
         strategy_signals = []
         valuation_p = None
         if sym.valuation_enabled:
+            valuation_asof = latest.get("valuation_asof")
+            try:
+                valuation_lag = valuation_lag_sessions(
+                    valuation_asof, signal_date
+                )
+            except TradingCalendarUnavailable:
+                valuation_lag = None
             s_val = valuation_signal(
                 sym.id,
                 pe_p,
@@ -268,8 +283,12 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
                     sym.valuation_proxy_label if sym.valuation_proxy else None
                 ),
                 profile=profile,
+                valuation_asof=valuation_asof,
+                valuation_lag_sessions=valuation_lag,
             )
             strategy_signals.append(s_val)
+            if s_val.meta.get("data_missing"):
+                valuation_issues.append(sym.name)
             raw_p = s_val.meta.get("p")
             valuation_p = float(raw_p) if raw_p is not None else None
 
@@ -328,11 +347,19 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
                 shares=base_h.shares,
                 cost_price=base_h.cost_price,
                 market_value=base_h.market_value,
-                take_profit_stage=base_h.take_profit_stage,
+                take_profit_stage=(
+                    base_h.take_profit_stage if base_h.shares > 0 else 0
+                ),
                 trend_state=trend_state,
                 trailing_armed=bool(s_profit.meta.get("trailing_armed")),
                 trail_peak_price=s_profit.meta.get("trail_peak_price"),
             )
+        )
+
+    if valuation_issues:
+        warning = (
+            (warning + "；" if warning else "")
+            + f"{'、'.join(valuation_issues)}估值过期或缺失，已安全暂停新增"
         )
 
     known = {h.symbol for h in updated_holdings}
@@ -344,9 +371,12 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
             Portfolio(holdings=updated_holdings, cash=portfolio.cash)
         )
 
-    items, floor_applied = ensure_minimum_investment(
-        items, p_amount, cfg.defaults.minimum_invest_ratio
-    )
+    if valuation_issues:
+        floor_applied = False
+    else:
+        items, floor_applied = ensure_minimum_investment(
+            items, p_amount, cfg.defaults.minimum_invest_ratio
+        )
     if floor_applied:
         warning = (
             (warning + "；" if warning else "")
@@ -359,8 +389,6 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
             (warning + "；" if warning else "")
             + f"现金池调节系数 {pool_factor:.2f}"
         )
-        if pool_factor < 0.5:
-            warning += "（弹药偏薄，已额外降速）"
 
     items, normalized = normalize_amounts(items, p_amount, cap_ratio)
 

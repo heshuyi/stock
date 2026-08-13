@@ -66,10 +66,14 @@ final\_mult = \mathrm{clip}(w_v \cdot m_{val} + w_t \cdot m_{trend},\; 0,\; max\
 
 - **武装线 / 清仓线**：以设置页全局 `valuation_reduce_percentile` / `valuation_exit_percentile` 为准（引擎覆盖 profile）。  
 - **追踪回撤幅度** `trail_drawdown`：按角色模板（核心 10%，成长 8%）。  
-- 配置里不再为各标的单独写武装/清仓分位，避免与设置页双轨冲突。### 3.2 估值
+- 配置里不再为各标的单独写武装/清仓分位，避免与设置页双轨冲突。
+
+### 3.2 估值
 
 - 核心：PE 分位为主；成长：0.55×PE + 0.45×PB 复合。  
 - 各标的 pause 阈值与倍数档见 `configs/symbols.json` → `strategy_profile`。
+- `5y` 分位窗口按信号日向前回溯 **5 个自然年**，不以 252 日近似；样本少于 5 个时视为数据缺失。
+- 估值日期与价格日期分别管理；估值最多允许滞后 5 个 XSHG 交易日，超过阈值按数据缺失安全暂停新增，不解释为“估值过高”。
 
 ### 3.3 趋势
 
@@ -87,7 +91,11 @@ final\_mult = \mathrm{clip}(w_v \cdot m_{val} + w_t \cdot m_{trend},\; 0,\; max\
 
 ### 3.6 现金池
 
-`pool_factor = clip(cash / (base_amount × 36), 0.35, 1.25)`；`cash=0` 表示未维护，系数视为 1.0。
+现金池由 `cash_pool_enabled` 显式控制，默认关闭。关闭时 `pool_factor=1.0`；启用时：
+
+`pool_factor = clip(cash / (base_amount × 36), 0.35, 1.25)`
+
+启用后的 `cash` 是真实可支配余额，`cash=0` 表示弹药为空。`pool_factor` 就是最终缩放系数，不再叠加隐藏折扣。
 
 ---
 
@@ -156,7 +164,9 @@ final\_mult = \mathrm{clip}(w_v \cdot m_{val} + w_t \cdot m_{trend},\; 0,\; max\
 - 每周：选择星期（一至五）  
 - 每月：选择日期（1–28）  
 - 可支配定投储备（现金池）  
+- 现金池显式启用开关（默认关闭；启用后 0 表示空池）
 - 目标权重、持仓、硬否决与止盈开关  
+- 保存时逐字段校验非负金额与合理上限，并校验短均线小于长均线、武装线低于清仓线、目标权重标的合法且合计为 1；422 错误在对应字段或组合旁显示
 - 保存后写入 Mongo（或 memory）并落盘 `backend/data/user_state.json`
 
 ---
@@ -181,4 +191,6 @@ final\_mult = \mathrm{clip}(w_v \cdot m_{val} + w_t \cdot m_{trend},\; 0,\; max\
 
 ## 8. 风险声明
 
-策略信号仅供学习与个人研究参考，不构成投资建议；历史分位与均线不能预测未来收益。
+可用 `PYTHONPATH=backend backend/.venv/bin/python backend/scripts/backtest_strategy.py` 对本地 SQLite 时点数据做 T-1 信号、下一交易日执行的离线回测，并与相同现金流和调度的等权固定定投比较。
+
+策略信号仅供学习与个人研究参考，不构成投资建议；历史分位与均线不能预测未来收益。回测受样本期、代理估值及 ETF 上市日期限制，策略仍需要严格的样本外证据。

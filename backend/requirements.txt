@@ -5,7 +5,7 @@ pymongo==4.9.2
 mongomock-motor==0.0.36
 pydantic==2.10.4
 pydantic-settings==2.7.0
-akshare==1.15.88
+akshare==1.16.72
 pandas==2.2.3
 numpy==2.2.1
 httpx==0.28.1
