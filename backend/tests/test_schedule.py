@@ -2,7 +2,10 @@
 
 from datetime import date
 
+import pytest
+
 from app.services.schedule import (
+    TradingCalendarUnavailable,
     execution_calendar,
     extend_calendar,
     is_execution_day,
@@ -13,6 +16,7 @@ from app.services.schedule import (
     resolve_monthly_execution,
     resolve_weekly_execution,
     weeks_with_trading_in_month,
+    xshg_sessions,
 )
 
 
@@ -169,3 +173,74 @@ def test_next_execution_estimates_weekly_when_future_bar_missing():
         latest_bar=date(2026, 7, 9),
     )
     assert nxt == "2026-07-13"  # next Monday
+
+
+def test_xshg_calendar_excludes_spring_festival_and_national_day():
+    february = xshg_sessions(date(2026, 2, 1), date(2026, 2, 28))
+    october = xshg_sessions(date(2026, 10, 1), date(2026, 10, 12))
+
+    assert date(2026, 2, 13) in february
+    assert date(2026, 2, 16) not in february
+    assert date(2026, 2, 23) not in february
+    assert date(2026, 2, 24) in february
+    assert date(2026, 10, 1) not in october
+    assert date(2026, 10, 8) in october
+
+
+def test_period_amount_uses_complete_month_at_month_start_and_midmonth():
+    full_month = xshg_sessions(date(2026, 8, 1), date(2026, 8, 31))
+
+    at_month_start = period_amount(
+        3000, "daily", year=2026, month=8, trading_days=full_month
+    )
+    at_midmonth = period_amount(
+        3000, "daily", year=2026, month=8, trading_days=full_month
+    )
+
+    assert at_month_start == at_midmonth
+    assert at_month_start == 142.85
+
+
+@pytest.mark.parametrize("frequency", ["daily", "weekly"])
+def test_period_allocations_never_exceed_monthly_budget(frequency):
+    full_month = xshg_sessions(date(2026, 8, 1), date(2026, 8, 31))
+    amount = period_amount(
+        100, frequency, year=2026, month=8, trading_days=full_month
+    )
+    periods = (
+        len(full_month)
+        if frequency == "daily"
+        else weeks_with_trading_in_month(full_month, 2026, 8)
+    )
+
+    assert amount * periods <= 100
+    assert 100 - amount * periods < periods / 100
+
+
+def test_period_amount_fails_closed_without_official_month():
+    with pytest.raises(TradingCalendarUnavailable):
+        period_amount(3000, "daily", year=2026, month=8, trading_days=[])
+
+
+def test_monthly_period_also_fails_closed_without_official_month():
+    with pytest.raises(TradingCalendarUnavailable):
+        period_amount(3000, "monthly", year=2026, month=8, trading_days=[])
+
+
+def test_weekly_execution_rolls_to_first_session_after_labor_day():
+    sessions = xshg_sessions(date(2026, 5, 1), date(2026, 5, 8))
+
+    assert resolve_weekly_execution(date(2026, 5, 6), 1, sessions) == date(
+        2026, 5, 6
+    )
+
+
+def test_next_execution_date_is_strictly_after_execution_day():
+    nxt = next_execution_date(
+        date(2026, 7, 10),
+        "daily",
+        warehouse_days=["2026-07-09"],
+        latest_bar=date(2026, 7, 9),
+    )
+
+    assert nxt == "2026-07-13"

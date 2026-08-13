@@ -7,7 +7,7 @@
 
 ## 1. 产品定位
 
-个人本地投顾看板。面向 A 股宽基 ETF，按用户设定的**月定投总预算**与**定投频率（每日 / 每周 / 每月）**，在每个执行日给出可执行操作清单：买入金额、暂停、减仓，并展示分角色策略明细。
+个人本地投顾看板。面向 A 股宽基 ETF，按用户设定的**月定投总预算**与**定投频率（每日 / 每周 / 每月）**，在每个执行日给出操作清单：本期分配额度、暂停、减仓，并展示分角色策略明细。分配额度用于策略预算分配，不等于按 ETF 一手规则取整后的券商可下单金额。
 
 ### 用户故事
 
@@ -110,15 +110,17 @@ final\_mult = \mathrm{clip}(w_v \cdot m_{val} + w_t \cdot m_{trend},\; 0,\; max\
 | 每周 | `base_amount / W_month`，`W_month` = 当月含 ≥1 个交易日的 ISO 自然周数 |
 | 每月 | `base_amount` |
 
-单标的建议买入：
+`N_month` / `W_month` 均按 XSHG 官方完整当月日历计算，不随月内日期变化；每日/每周结果向下取整到分，确保整月计划额度不超过月预算。
+
+单标的本期分配额度：
 
 `amount = period_amount × target_weight × final_mult`
 
-预算上限与现金池缩放均基于 **`period_amount`**。
+预算上限与现金池缩放均基于 **`period_amount`**。该额度不负责换算 ETF 价格、100 份一手或券商费用。
 
 ### 4.3 执行日
 
-交易日历来自行情仓（优先 HS300 的 `market_bars` 日期）。
+交易日历来自 `exchange-calendars` 的 XSHG 官方日历；行情仓只用于确认 T-1 收盘数据是否已就绪。日历不可用时 fail closed，暂停当期额度，不用普通工作日猜测。
 
 | 频率 | 规则 |
 |------|------|
@@ -127,7 +129,8 @@ final\_mult = \mathrm{clip}(w_v \cdot m_{val} + w_t \cdot m_{trend},\; 0,\; max\
 | 每月 | 目标自然日（1–28）；休市则顺延至**本月**下一交易日；本月无则顺延至**下月首个交易日** |
 
 - 「今天」= 用户自然日（`date.today()`）；策略信号仍用 **T-1** 收盘。  
-- 非执行日：`execution_today=false`，买入金额清零并注明原因；`reduce` 止盈不受影响。  
+- 非执行日：`execution_today=false`，分配额度清零并注明原因；`reduce` 止盈不受影响。
+- `next_execution_date` 始终严格晚于今天；是否今天执行只由 `execution_today` 表示。
 - 看板额外字段：`period_amount`、`execution_today`、`next_execution_date`、`buy_frequency`。
 
 ---
@@ -138,8 +141,8 @@ final\_mult = \mathrm{clip}(w_v \cdot m_{val} + w_t \cdot m_{trend},\; 0,\; max\
 
 1. 信号日期（T-1）  
 2. 是否今日执行定投 / 下一执行日  
-3. 月预算、本期基准额、今日合计买入  
-4. 各标的操作卡片（金额 / 倍数 / 硬否决 / **合成依据与子策略 reason**）  
+3. 月预算、本期基准分配、今日合计分配
+4. 各标的操作卡片（本期分配额度 / 倍数 / 硬否决 / **合成依据与子策略 reason**）
 5. 警告（现金池、非执行日、mock 等）
 
 策略对比页额外展示：**估值 / 均线 / 止盈 / 合成的计算依据说明**，以及各标的当日信号 `reason`（可展开对照倍数表）。
