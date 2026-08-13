@@ -253,10 +253,20 @@ def test_profit_taking_ignores_return_trigger():
 
 def test_profit_taking_requires_a_position():
     s = profit_taking_signal(
-        "HS300", valuation_p=0.95, price=100, has_position=False, profile=CORE
+        "HS300",
+        valuation_p=0.95,
+        price=100,
+        has_position=False,
+        current_stage=2,
+        trailing_armed=True,
+        trail_peak_price=120,
+        profile=CORE,
     )
     assert s.action == "hold"
     assert s.reduce_ratio is None
+    assert s.meta["recommended_stage"] == 0
+    assert s.meta["trailing_armed"] is False
+    assert s.meta["trail_peak_price"] is None
 
 
 def test_rebalance_underweight():
@@ -427,8 +437,12 @@ def test_valuation_trend_weighted_average():
 
 def test_cash_pool_factor_and_scale():
     assert cash_pool_factor(0, 10000, 36) == 1.0
-    assert abs(cash_pool_factor(360000, 10000, 36) - 1.0) < 1e-9
-    thin = cash_pool_factor(50000, 10000, 36)
+    assert cash_pool_factor(0, 10000, 36, enabled=True) == 0.35
+    assert (
+        abs(cash_pool_factor(360000, 10000, 36, enabled=True) - 1.0)
+        < 1e-9
+    )
+    thin = cash_pool_factor(50000, 10000, 36, enabled=True)
     assert thin < 0.5
     from app.models import EnsembleResult
 
@@ -447,7 +461,8 @@ def test_cash_pool_factor_and_scale():
     ]
     scaled, applied = apply_cash_pool(items, 0.4)
     assert applied is True
-    assert scaled[0].amount == 320.0  # 0.4 * 0.8 extra cut
+    assert scaled[0].amount == 400.0
+    assert scaled[0].multiplier == 0.4
 
 
 def test_normalize_cap():

@@ -137,9 +137,11 @@ def cash_pool_factor(
     cash: float,
     base_amount: float,
     reserve_months: int = 36,
+    *,
+    enabled: bool = False,
 ) -> float:
-    """Scale factor from dry-powder depth; cash<=0 means 'not tracked' → 1.0."""
-    if cash <= 0 or base_amount <= 0 or reserve_months <= 0:
+    """Scale from tracked dry powder; disabled means no cash-pool adjustment."""
+    if not enabled or base_amount <= 0 or reserve_months <= 0:
         return 1.0
     target = base_amount * reserve_months
     return _clip(cash / target, 0.35, 1.25)
@@ -149,10 +151,10 @@ def apply_cash_pool(
     items: list[EnsembleResult],
     pool_factor: float,
 ) -> tuple[list[EnsembleResult], bool]:
-    """Scale buy amounts by cash-pool factor; extra cut when pool is thin."""
+    """Scale buy amounts exactly by the supplied cash-pool factor."""
     if abs(pool_factor - 1.0) < 1e-9:
         return items, False
-    scale = pool_factor * 0.8 if pool_factor < 0.5 else pool_factor
+    scale = pool_factor
     adjusted: list[EnsembleResult] = []
     changed = False
     for item in items:

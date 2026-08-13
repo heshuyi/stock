@@ -1,8 +1,15 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 
 Action = Literal["buy", "pause", "reduce", "hold"]
@@ -49,7 +56,7 @@ class SymbolConfig(BaseModel):
     etf_code: str
     index_code: str
     akshare_symbol: str
-    target_weight: float
+    target_weight: float = Field(ge=0, le=1)
     role: str = ""
     pe_symbol: str | None = None
     pb_symbol: str | None = None
@@ -60,26 +67,33 @@ class SymbolConfig(BaseModel):
 
 
 class StrategyDefaults(BaseModel):
-    base_amount: float = 10000
-    ma_short: int = 60
-    ma_long: int = 120
+    base_amount: float = Field(default=10000, ge=0, le=1_000_000_000)
+    ma_short: int = Field(default=60, ge=1, le=2000)
+    ma_long: int = Field(default=120, ge=2, le=2000)
     hard_veto_enabled: bool = True
-    normalize_buy_cap: float = 1.5
-    minimum_invest_ratio: float = 0.0
+    normalize_buy_cap: float = Field(default=1.5, ge=0, le=10)
+    minimum_invest_ratio: float = Field(default=0.0, ge=0, le=1)
     buy_frequency: BuyFrequency = "monthly"
     weekly_weekday: int = Field(default=1, ge=1, le=5)
     monthly_day: int = Field(default=1, ge=1, le=28)
     profit_take_enabled: bool = True
-    profit_take_return: float = 0.30  # legacy; return-based exit disabled in v3
-    valuation_reduce_percentile: float = 0.80
-    valuation_exit_percentile: float = 0.90
-    cash_reserve_months: int = 36
+    valuation_reduce_percentile: float = Field(default=0.80, ge=0, le=1)
+    valuation_exit_percentile: float = Field(default=0.90, ge=0, le=1)
+    cash_reserve_months: int = Field(default=36, ge=1, le=120)
     strategy_weights: dict[str, float] = Field(
         default_factory=lambda: {
             "valuation": 0.7,
             "trend": 0.3,
         }
     )
+
+    @model_validator(mode="after")
+    def validate_ranges(self) -> StrategyDefaults:
+        if self.ma_short >= self.ma_long:
+            raise ValueError("短均线周期必须小于长均线周期")
+        if self.valuation_reduce_percentile >= self.valuation_exit_percentile:
+            raise ValueError("估值武装线必须低于估值清仓线")
+        return self
 
 
 class AppConfig(BaseModel):
@@ -114,34 +128,117 @@ class EnsembleResult(BaseModel):
 
 class Holding(BaseModel):
     symbol: str
-    shares: float = 0
-    cost_price: float = 0
-    market_value: float | None = None
+    shares: float = Field(default=0, ge=0, le=1_000_000_000_000)
+    cost_price: float = Field(default=0, ge=0, le=10_000_000)
+    market_value: float | None = Field(default=None, ge=0, le=1_000_000_000_000)
     take_profit_stage: int = Field(default=0, ge=0, le=2)
     trend_state: TrendState | None = None
     trailing_armed: bool = False
     trail_peak_price: float | None = None
 
+    @field_validator("shares", "cost_price", "market_value", mode="before")
+    @classmethod
+    def validate_financial_value(cls, value: Any, info: ValidationInfo) -> Any:
+        if value is None and info.field_name == "market_value":
+            return value
+        limits = {
+            "shares": ("份额", 1_000_000_000_000),
+            "cost_price": ("成本价", 10_000_000),
+            "market_value": ("市值", 1_000_000_000_000),
+        }
+        if isinstance(value, (int, float)):
+            label, upper = limits[info.field_name]
+            if value < 0 or value > upper:
+                raise ValueError(f"{label}必须在 0 到 {upper:g} 之间")
+        return value
+
 
 class Portfolio(BaseModel):
     holdings: list[Holding] = Field(default_factory=list)
-    cash: float = 0
+    cash: float = Field(default=0, ge=0, le=1_000_000_000_000)
+
+    @field_validator("cash", mode="before")
+    @classmethod
+    def validate_cash(cls, value: Any) -> Any:
+        if isinstance(value, (int, float)) and not 0 <= value <= 1_000_000_000_000:
+            raise ValueError("现金必须在 0 到 1 万亿元之间")
+        return value
 
 
 class UserSettings(BaseModel):
-    base_amount: float = 10000
+    model_config = ConfigDict(extra="ignore")
+
+    KNOWN_SYMBOL_IDS: ClassVar[frozenset[str]] = frozenset(
+        {"HS300", "ZZ500", "CYB200", "KCB50", "SZ50"}
+    )
+
+    base_amount: float = Field(default=10000, ge=0, le=1_000_000_000)
     hard_veto_enabled: bool = True
-    normalize_buy_cap: float = 1.5
+    normalize_buy_cap: float = Field(default=1.5, ge=0, le=10)
     target_weights: dict[str, float] | None = None
-    ma_short: int = 60
-    ma_long: int = 120
+    ma_short: int = Field(default=60, ge=1, le=2000)
+    ma_long: int = Field(default=120, ge=2, le=2000)
     buy_frequency: BuyFrequency = "monthly"
     weekly_weekday: int = Field(default=1, ge=1, le=5)
     monthly_day: int = Field(default=1, ge=1, le=28)
     profit_take_enabled: bool = True
-    profit_take_return: float = 0.30  # legacy; return-based exit disabled in v3
-    valuation_reduce_percentile: float = 0.80
-    valuation_exit_percentile: float = 0.90
+    valuation_reduce_percentile: float = Field(default=0.80, ge=0, le=1)
+    valuation_exit_percentile: float = Field(default=0.90, ge=0, le=1)
+    cash_pool_enabled: bool = False
+
+    @field_validator(
+        "base_amount",
+        "normalize_buy_cap",
+        "ma_short",
+        "ma_long",
+        "valuation_reduce_percentile",
+        "valuation_exit_percentile",
+        mode="before",
+    )
+    @classmethod
+    def validate_setting_bounds(cls, value: Any, info: ValidationInfo) -> Any:
+        limits = {
+            "base_amount": ("月定投预算", 0, 1_000_000_000),
+            "normalize_buy_cap": ("买入预算上限倍数", 0, 10),
+            "ma_short": ("短均线周期", 1, 2000),
+            "ma_long": ("长均线周期", 2, 2000),
+            "valuation_reduce_percentile": ("估值武装线", 0, 1),
+            "valuation_exit_percentile": ("估值清仓线", 0, 1),
+        }
+        if isinstance(value, (int, float)):
+            label, lower, upper = limits[info.field_name]
+            if value < lower or value > upper:
+                raise ValueError(f"{label}必须在 {lower:g} 到 {upper:g} 之间")
+        return value
+
+    @field_validator("target_weights")
+    @classmethod
+    def validate_target_weights(
+        cls, weights: dict[str, float] | None
+    ) -> dict[str, float] | None:
+        if weights is None:
+            return None
+        unknown = sorted(set(weights) - cls.KNOWN_SYMBOL_IDS)
+        if unknown:
+            raise ValueError(f"目标权重包含未知标的：{'、'.join(unknown)}")
+        if set(weights) != cls.KNOWN_SYMBOL_IDS:
+            missing = sorted(cls.KNOWN_SYMBOL_IDS - set(weights))
+            raise ValueError(f"目标权重缺少标的：{'、'.join(missing)}")
+        invalid = [symbol for symbol, weight in weights.items() if not 0 <= weight <= 1]
+        if invalid:
+            raise ValueError(f"目标权重必须在 0 到 1 之间：{'、'.join(invalid)}")
+        total = sum(weights.values())
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError(f"目标权重合计必须为 1，当前为 {total:.6f}")
+        return weights
+
+    @model_validator(mode="after")
+    def validate_combinations(self) -> UserSettings:
+        if self.ma_short >= self.ma_long:
+            raise ValueError("短均线周期必须小于长均线周期")
+        if self.valuation_reduce_percentile >= self.valuation_exit_percentile:
+            raise ValueError("估值武装线必须低于估值清仓线")
+        return self
 
 
 class DashboardResponse(BaseModel):
