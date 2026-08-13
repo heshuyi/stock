@@ -16,7 +16,7 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +32,7 @@ def _empty_failure(
     detail: str,
 ) -> dict[str, Any]:
     return {
-        "synced_at": datetime.utcnow().isoformat() + "Z",
+        "synced_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "results": [],
         "purged": [],
         "skipped": 0,

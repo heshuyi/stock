@@ -9,9 +9,7 @@ from app.strategies.ensemble import (
     ensure_minimum_investment,
     normalize_amounts,
 )
-from app.strategies.grid import grid_signal
 from app.strategies.profit_taking import profit_taking_signal
-from app.strategies.rebalance import rebalance_signal
 from app.strategies.trend import trend_signal
 from app.strategies.valuation import valuation_signal
 
@@ -267,18 +265,6 @@ def test_profit_taking_requires_a_position():
     assert s.meta["recommended_stage"] == 0
     assert s.meta["trailing_armed"] is False
     assert s.meta["trail_peak_price"] is None
-
-
-def test_rebalance_underweight():
-    """Legacy module smoke test (not used by engine)."""
-    s = rebalance_signal("HS300", current_weight=0.2, target_weight=0.4)
-    assert s.multiplier == 1.4
-
-
-def test_grid_deep_drawdown():
-    """Legacy module smoke test (not used by engine)."""
-    s = grid_signal("HS300", 0.35)
-    assert s.multiplier == 1.6
 
 
 def test_hard_veto_growth_bear_blocks_buy():
