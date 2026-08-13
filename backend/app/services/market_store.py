@@ -45,6 +45,8 @@ CREATE TABLE IF NOT EXISTS market_bars (
     pb REAL,
     pe_percentile REAL,
     pb_percentile REAL,
+    valuation_asof TEXT,
+    valuation_source TEXT,
     source TEXT,
     updated_at TEXT,
     PRIMARY KEY (symbol, date)
@@ -108,6 +110,10 @@ def ensure_store() -> Path:
         }
         if "etf_close" not in columns:
             conn.execute("ALTER TABLE market_bars ADD COLUMN etf_close REAL")
+        if "valuation_asof" not in columns:
+            conn.execute("ALTER TABLE market_bars ADD COLUMN valuation_asof TEXT")
+        if "valuation_source" not in columns:
+            conn.execute("ALTER TABLE market_bars ADD COLUMN valuation_source TEXT")
         conn.commit()
     finally:
         conn.close()
@@ -208,6 +214,8 @@ def upsert_records(symbol: str, records: list[dict[str, Any]]) -> int:
             r.get("pb"),
             r.get("pe_percentile"),
             r.get("pb_percentile"),
+            r.get("valuation_asof"),
+            r.get("valuation_source"),
             r.get("source"),
             now,
         )
@@ -219,8 +227,9 @@ def upsert_records(symbol: str, records: list[dict[str, Any]]) -> int:
             INSERT INTO market_bars (
                 symbol, date, open, high, low, close, volume,
                 etf_close, ma_short, ma_long, high_1y, drawdown,
-                pe, pb, pe_percentile, pb_percentile, source, updated_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                pe, pb, pe_percentile, pb_percentile,
+                valuation_asof, valuation_source, source, updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(symbol, date) DO UPDATE SET
                 open=excluded.open,
                 high=excluded.high,
@@ -236,6 +245,8 @@ def upsert_records(symbol: str, records: list[dict[str, Any]]) -> int:
                 pb=COALESCE(excluded.pb, market_bars.pb),
                 pe_percentile=COALESCE(excluded.pe_percentile, market_bars.pe_percentile),
                 pb_percentile=COALESCE(excluded.pb_percentile, market_bars.pb_percentile),
+                valuation_asof=COALESCE(excluded.valuation_asof, market_bars.valuation_asof),
+                valuation_source=COALESCE(excluded.valuation_source, market_bars.valuation_source),
                 source=excluded.source,
                 updated_at=excluded.updated_at
             """,
@@ -401,6 +412,8 @@ def materialize_valuation_metrics(
             record.get("pb"),
             record.get("pe_percentile"),
             record.get("pb_percentile"),
+            record.get("valuation_asof"),
+            record.get("valuation_source"),
             symbol,
             record["date"],
         )
@@ -412,15 +425,30 @@ def materialize_valuation_metrics(
         conn.executemany(
             """
             UPDATE market_bars SET
-                pe=COALESCE(?, pe),
-                pb=COALESCE(?, pb),
-                pe_percentile=COALESCE(?, pe_percentile),
-                pb_percentile=COALESCE(?, pb_percentile)
+                pe=?,
+                pb=?,
+                pe_percentile=?,
+                pb_percentile=?,
+                valuation_asof=?,
+                valuation_source=?
             WHERE symbol=? AND date=?
             """,
             rows,
         )
     return len(rows)
+
+
+def latest_valuation_asof(symbol: str) -> str | None:
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT MAX(date) AS valuation_asof
+            FROM valuation_observations
+            WHERE symbol=? AND (pe_ttm IS NOT NULL OR pb IS NOT NULL)
+            """,
+            (symbol,),
+        ).fetchone()
+    return str(row["valuation_asof"]) if row and row["valuation_asof"] else None
 
 
 def get_bar(symbol: str, as_of: str) -> dict[str, Any] | None:
@@ -663,6 +691,8 @@ def data_overview() -> dict[str, Any]:
                     MAX(date) AS latest_date,
                     MAX(updated_at) AS updated_at,
                     GROUP_CONCAT(DISTINCT source) AS sources,
+                    MAX(valuation_asof) AS valuation_asof,
+                    GROUP_CONCAT(DISTINCT valuation_source) AS valuation_sources,
                     SUM(CASE WHEN close IS NULL THEN 1 ELSE 0 END) AS missing_close,
                     SUM(CASE WHEN etf_close IS NULL THEN 1 ELSE 0 END) AS missing_etf_close,
                     SUM(CASE WHEN pe IS NULL THEN 1 ELSE 0 END) AS missing_pe,
@@ -717,6 +747,59 @@ def data_overview() -> dict[str, Any]:
         else 0.0
     )
     warehouse = resolve_signal_date()
+    overall["price_completeness_pct"] = (
+        round((total - int(overall.get("missing_close") or 0)) / total * 100, 2)
+        if total
+        else 0.0
+    )
+    overall["valuation_completeness_pct"] = (
+        round(
+            max(
+                0.0,
+                1.0
+                - (
+                    int(overall.get("missing_pe") or 0)
+                    + int(overall.get("missing_pb") or 0)
+                )
+                / (total * 2),
+            )
+            * 100,
+            2,
+        )
+        if total
+        else 0.0
+    )
+    overall["etf_completeness_pct"] = (
+        round(
+            (total - int(overall.get("missing_etf_close") or 0)) / total * 100,
+            2,
+        )
+        if total
+        else 0.0
+    )
+    fresh_symbols = 0
+    for item in symbols:
+        lag: int | None = None
+        valuation_asof = item.get("valuation_asof")
+        if warehouse and valuation_asof:
+            try:
+                from app.services.schedule import xshg_sessions
+
+                observed = date.fromisoformat(str(valuation_asof)[:10])
+                signal = date.fromisoformat(str(warehouse)[:10])
+                lag = (
+                    0
+                    if observed >= signal
+                    else len(xshg_sessions(observed + timedelta(days=1), signal))
+                )
+            except Exception:
+                lag = None
+        item["valuation_lag_sessions"] = lag
+        item["valuation_fresh"] = lag is not None and lag <= 5
+        fresh_symbols += int(item["valuation_fresh"])
+    overall["valuation_freshness_pct"] = (
+        round(fresh_symbols / len(symbols) * 100, 2) if symbols else 0.0
+    )
     calendar_t1 = expected_trading_t1().isoformat()
     return {
         "db_path": str(path),
@@ -782,7 +865,8 @@ def query_market_page(
                 SELECT
                     symbol, date, open, high, low, close, volume, etf_close,
                     ma_short, ma_long, drawdown, pe, pb,
-                    pe_percentile, pb_percentile, source, updated_at
+                    pe_percentile, pb_percentile, valuation_asof,
+                    valuation_source, source, updated_at
                 FROM market_bars
                 {where}
                 ORDER BY date DESC, symbol DESC

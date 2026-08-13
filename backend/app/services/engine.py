@@ -12,7 +12,11 @@ from app.db import (
     save_portfolio,
 )
 from app.models import DashboardResponse, EnsembleResult, Holding, Portfolio
-from app.services.market_data import get_signal_market, warm_latest_snapshots
+from app.services.market_data import (
+    get_signal_market,
+    valuation_lag_sessions,
+    warm_latest_snapshots,
+)
 from app.services import market_store
 from app.services.schedule import (
     execution_calendar,
@@ -216,6 +220,7 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
     items: list[EnsembleResult] = []
     updated_holdings: list[Holding] = []
     holdings_by_id = {h.symbol: h for h in portfolio.holdings}
+    valuation_issues: list[str] = []
 
     for sym in cfg.symbols:
         latest = latest_by_symbol.get(sym.id)
@@ -258,6 +263,13 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
         strategy_signals = []
         valuation_p = None
         if sym.valuation_enabled:
+            valuation_asof = latest.get("valuation_asof")
+            try:
+                valuation_lag = valuation_lag_sessions(
+                    valuation_asof, signal_date
+                )
+            except TradingCalendarUnavailable:
+                valuation_lag = None
             s_val = valuation_signal(
                 sym.id,
                 pe_p,
@@ -268,8 +280,12 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
                     sym.valuation_proxy_label if sym.valuation_proxy else None
                 ),
                 profile=profile,
+                valuation_asof=valuation_asof,
+                valuation_lag_sessions=valuation_lag,
             )
             strategy_signals.append(s_val)
+            if s_val.meta.get("data_missing"):
+                valuation_issues.append(sym.name)
             raw_p = s_val.meta.get("p")
             valuation_p = float(raw_p) if raw_p is not None else None
 
@@ -335,6 +351,12 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
             )
         )
 
+    if valuation_issues:
+        warning = (
+            (warning + "；" if warning else "")
+            + f"{'、'.join(valuation_issues)}估值过期或缺失，已安全暂停新增"
+        )
+
     known = {h.symbol for h in updated_holdings}
     for h in portfolio.holdings:
         if h.symbol not in known:
@@ -344,9 +366,12 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
             Portfolio(holdings=updated_holdings, cash=portfolio.cash)
         )
 
-    items, floor_applied = ensure_minimum_investment(
-        items, p_amount, cfg.defaults.minimum_invest_ratio
-    )
+    if valuation_issues:
+        floor_applied = False
+    else:
+        items, floor_applied = ensure_minimum_investment(
+            items, p_amount, cfg.defaults.minimum_invest_ratio
+        )
     if floor_applied:
         warning = (
             (warning + "；" if warning else "")

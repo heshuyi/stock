@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from app.models import StrategyProfile, StrategySignal
 
+_UNSET = object()
+
 
 def _compose_percentile(
     pe_percentile: float | None,
@@ -38,6 +40,9 @@ def valuation_signal(
     pb: float | None = None,
     proxy_label: str | None = None,
     profile: StrategyProfile | None = None,
+    valuation_asof: str | None | object = _UNSET,
+    valuation_lag_sessions: int | None | object = _UNSET,
+    max_lag_sessions: int = 5,
 ) -> StrategySignal:
     """Role-aware valuation DCA multiplier from percentile bands."""
     profile = profile or StrategyProfile()
@@ -50,6 +55,47 @@ def valuation_signal(
     p, mode_note, missing = _compose_percentile(
         pe_percentile, pb_percentile, profile
     )
+    freshness_expected = (
+        valuation_asof is not _UNSET or valuation_lag_sessions is not _UNSET
+    )
+    asof_value = None if valuation_asof is _UNSET else valuation_asof
+    lag_value = None if valuation_lag_sessions is _UNSET else valuation_lag_sessions
+    freshness_missing = freshness_expected and (
+        not asof_value or lag_value is None
+    )
+    freshness_stale = (
+        isinstance(lag_value, int) and lag_value > max_lag_sessions
+    )
+    freshness_meta = {
+        "valuation_asof": asof_value,
+        "valuation_lag_sessions": lag_value,
+        "max_lag_sessions": max_lag_sessions,
+    }
+    if freshness_missing or freshness_stale:
+        freshness_reason = (
+            f"估值滞后 {lag_value} 个交易日（>{max_lag_sessions}），暂停新增"
+            if freshness_stale
+            else "估值缺失日期或新鲜度无法确认，暂停新增"
+        )
+        return StrategySignal(
+            strategy="valuation",
+            symbol=symbol,
+            action="pause",
+            multiplier=0.0,
+            confidence=0.0,
+            reason=f"{source_note}{freshness_reason}",
+            meta={
+                "pe": pe,
+                "pb": pb,
+                "pe_percentile": pe_percentile,
+                "pb_percentile": pb_percentile,
+                "proxy_label": proxy_label,
+                "valuation_mode": profile.valuation_mode,
+                "percentile_window": profile.percentile_window,
+                "data_missing": True,
+                **freshness_meta,
+            },
+        )
     if missing or p is None:
         return StrategySignal(
             strategy="valuation",
@@ -67,6 +113,7 @@ def valuation_signal(
                 "valuation_mode": profile.valuation_mode,
                 "percentile_window": profile.percentile_window,
                 "data_missing": True,
+                **freshness_meta,
             },
         )
 
@@ -109,5 +156,6 @@ def valuation_signal(
             "valuation_mode": profile.valuation_mode,
             "percentile_window": profile.percentile_window,
             "data_missing": False,
+            **freshness_meta,
         },
     )
