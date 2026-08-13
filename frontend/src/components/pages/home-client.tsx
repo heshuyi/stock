@@ -65,11 +65,18 @@ function OperationCard({ item }: { item: EnsembleItem }) {
             </>
           ) : item.action === "buy" && item.amount > 0 ? (
             <>
-              <p className="text-xs uppercase tracking-wider text-ink/45">建议买入</p>
-              <p className="font-display text-3xl text-moss">
-                ¥{item.amount.toLocaleString("zh-CN", { maximumFractionDigits: 0 })}
+              <p className="text-xs uppercase tracking-wider text-ink/45">
+                本期分配额度
               </p>
-              <p className="text-sm text-ink/60">倍数 ×{item.multiplier.toFixed(2)}</p>
+              <p className="font-display text-3xl text-moss">
+                ¥
+                {item.amount.toLocaleString("zh-CN", {
+                  maximumFractionDigits: 2,
+                })}
+              </p>
+              <p className="text-sm text-ink/60">
+                非券商可下单金额 · 倍数 ×{item.multiplier.toFixed(2)}
+              </p>
             </>
           ) : (
             <>
@@ -79,7 +86,7 @@ function OperationCard({ item }: { item: EnsembleItem }) {
               <p className="font-display text-3xl text-ink/45">¥0</p>
               <p className="text-sm text-ink/60">
                 {item.action === "pause"
-                  ? "本期不新增买入"
+                  ? "本期不分配新增买入额度"
                   : `倍数 ×${item.multiplier.toFixed(2)}`}
               </p>
             </>
@@ -210,7 +217,7 @@ export default function HomePage() {
           {data && (
             <div className="rounded-lg bg-ink px-4 py-3 text-paper sm:py-2">
               <p className="text-[10px] uppercase tracking-wider opacity-70">
-                今日合计买入
+                今日合计分配
               </p>
               <p className="font-display text-xl">
                 ¥
@@ -219,7 +226,7 @@ export default function HomePage() {
                 })}
               </p>
               <p className="text-xs opacity-70">
-                月预算 ¥{data.base_amount.toLocaleString("zh-CN")} · 本期 ¥
+                月预算 ¥{data.base_amount.toLocaleString("zh-CN")} · 本期基准分配 ¥
                 {(data.period_amount ?? data.base_amount).toLocaleString(
                   "zh-CN"
                 )}

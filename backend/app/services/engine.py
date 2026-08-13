@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from calendar import monthrange
 from datetime import date
 from typing import Any
 
@@ -18,6 +19,7 @@ from app.services.schedule import (
     is_execution_day,
     next_execution_date,
     period_amount,
+    TradingCalendarUnavailable,
 )
 from app.strategies.ensemble import (
     apply_cash_pool,
@@ -104,38 +106,54 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
     latest_bar: date | None = None
     if signal_date:
         latest_bar = date.fromisoformat(str(signal_date)[:10])
-    trading_days = execution_calendar(
-        warehouse_days,
-        today=execution_day,
-        latest_bar=latest_bar,
+    month_end = date(
+        execution_day.year,
+        execution_day.month,
+        monthrange(execution_day.year, execution_day.month)[1],
     )
-    p_amount = period_amount(
-        settings.base_amount,
-        settings.buy_frequency,
-        year=execution_day.year,
-        month=execution_day.month,
-        trading_days=trading_days,
-    )
-    exec_today = is_execution_day(
-        execution_day,
-        settings.buy_frequency,
-        weekly_weekday=settings.weekly_weekday,
-        monthly_day=settings.monthly_day,
-        trading_days=trading_days,
-        latest_bar=latest_bar,
-    )
-    next_exec = next_execution_date(
-        execution_day if not exec_today else execution_day,
-        settings.buy_frequency,
-        weekly_weekday=settings.weekly_weekday,
-        monthly_day=settings.monthly_day,
-        warehouse_days=warehouse_days,
-        latest_bar=latest_bar,
-    )
-    # If today is an execution day, next_execution_date should still report today
-    # or the following one for display; prefer today when executing.
-    if exec_today:
-        next_exec = execution_day.isoformat()
+    try:
+        trading_days = execution_calendar(
+            warehouse_days,
+            today=execution_day,
+            latest_bar=latest_bar,
+            until=month_end,
+        )
+        p_amount = period_amount(
+            settings.base_amount,
+            settings.buy_frequency,
+            year=execution_day.year,
+            month=execution_day.month,
+            trading_days=trading_days,
+        )
+        exec_today = is_execution_day(
+            execution_day,
+            settings.buy_frequency,
+            weekly_weekday=settings.weekly_weekday,
+            monthly_day=settings.monthly_day,
+            trading_days=trading_days,
+            latest_bar=latest_bar,
+        )
+        next_exec = next_execution_date(
+            execution_day,
+            settings.buy_frequency,
+            weekly_weekday=settings.weekly_weekday,
+            monthly_day=settings.monthly_day,
+            warehouse_days=warehouse_days,
+            latest_bar=latest_bar,
+        )
+    except TradingCalendarUnavailable as exc:
+        return DashboardResponse(
+            date=signal_date or as_of or "",
+            base_amount=settings.base_amount,
+            period_amount=0,
+            buy_frequency=settings.buy_frequency,
+            execution_today=False,
+            next_execution_date=None,
+            total_buy_amount=0,
+            normalized=False,
+            items=[],
+            warning=f"{exc}；为避免错误分配，本期额度已暂停",
+        )
 
     sample = (
         await get_signal_market(cfg.symbols[0].id, signal_date) if signal_date else None
@@ -176,7 +194,7 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
     else:
         warning = (
             (warning + "；" if warning else "")
-            + f"今日非{freq_label}定投执行日，买入金额为 0"
+            + f"今日非{freq_label}定投执行日，分配额度为 0"
             + (f"，下一执行日 {next_exec}" if next_exec else "")
         )
 
