@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
 from app.db import (
     ensure_indexes,
+    get_db,
     get_portfolio,
     get_user_settings,
     load_app_config,
@@ -66,6 +67,15 @@ async def symbols():
 
 @app.get("/api/dashboard/today")
 async def dashboard_today():
+    """Read-through cache: serve the computed payload for the current T-1
+    signal date when present; only recompute when missing or invalidated."""
+    signal_date = market_store.resolve_signal_date()
+    if signal_date:
+        db = get_db()
+        doc = await db.signals_daily.find_one({"date": signal_date})
+        if doc:
+            doc.pop("_id", None)
+            return doc
     return await compute_dashboard()
 
 
@@ -92,6 +102,12 @@ async def market(symbol: str, limit: int = 365):
     return {"symbol": symbol.upper(), "series": series}
 
 
+async def _invalidate_dashboard_cache() -> None:
+    """Drop cached dashboard payloads so next reads recompute from fresh state."""
+    db = get_db()
+    await db.signals_daily.delete_many({})
+
+
 @app.get("/api/portfolio")
 async def read_portfolio():
     return await get_portfolio()
@@ -99,7 +115,9 @@ async def read_portfolio():
 
 @app.put("/api/portfolio")
 async def update_portfolio(portfolio: Portfolio):
-    return await save_portfolio(portfolio)
+    saved = await save_portfolio(portfolio)
+    await _invalidate_dashboard_cache()
+    return saved
 
 
 @app.get("/api/settings")
@@ -109,20 +127,26 @@ async def read_settings():
 
 @app.put("/api/settings")
 async def update_settings(body: UserSettings):
-    return await save_user_settings(body)
+    saved = await save_user_settings(body)
+    await _invalidate_dashboard_cache()
+    return saved
 
 
 @app.post("/api/jobs/sync")
 async def job_sync(use_mock: bool | None = None, force: bool = False):
     """Sync market data in an isolated subprocess (survives mini_racer abort)."""
     async with _sync_lock:
-        return await sync_all_isolated(use_mock=use_mock, force=force)
+        result = await sync_all_isolated(use_mock=use_mock, force=force)
+        await _invalidate_dashboard_cache()
+        return result
 
 
 @app.post("/api/jobs/backfill")
 async def job_backfill(months: int = 3):
     """Idle/manual monthly backfill into local warehouse."""
-    return await backfill_idle_chunk(months=months)
+    result = await backfill_idle_chunk(months=months)
+    await _invalidate_dashboard_cache()
+    return result
 
 
 @app.get("/api/data/status")

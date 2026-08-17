@@ -15,7 +15,6 @@ from app.models import DashboardResponse, EnsembleResult, Holding, Portfolio
 from app.services.market_data import (
     get_signal_market,
     valuation_lag_sessions,
-    warm_latest_snapshots,
 )
 from app.services import market_store
 from app.services.schedule import (
@@ -80,11 +79,15 @@ def _suppress_buys_for_non_execution(
     out: list[EnsembleResult] = []
     for item in items:
         if item.action == "buy" and item.amount > 0:
-            data = item.model_dump()
-            data["action"] = "hold"
-            data["amount"] = 0.0
-            data["reason"] = "非定投执行日，仅观察；" + item.reason
-            out.append(EnsembleResult.model_validate(data))
+            out.append(
+                item.model_copy(
+                    update={
+                        "action": "hold",
+                        "amount": 0.0,
+                        "reason": "非定投执行日，仅观察；" + item.reason,
+                    }
+                )
+            )
         else:
             out.append(item)
     return out
@@ -101,14 +104,9 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
     }
 
     warning = None
-    await warm_latest_snapshots()
 
     signal_date, as_of_mode = _clamp_signal_date(as_of)
     execution_day = date.today()
-    warehouse_days = market_store.list_trading_dates(
-        start=f"{execution_day.year - 1}-01-01",
-        end=f"{execution_day.year + 1}-12-31",
-    )
     latest_bar: date | None = None
     if signal_date:
         latest_bar = date.fromisoformat(str(signal_date)[:10])
@@ -119,7 +117,6 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
     )
     try:
         trading_days = execution_calendar(
-            warehouse_days,
             today=execution_day,
             latest_bar=latest_bar,
             until=month_end,
@@ -144,7 +141,7 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
             settings.buy_frequency,
             weekly_weekday=settings.weekly_weekday,
             monthly_day=settings.monthly_day,
-            warehouse_days=warehouse_days,
+            trading_days=trading_days,
             latest_bar=latest_bar,
         )
     except TradingCalendarUnavailable as exc:

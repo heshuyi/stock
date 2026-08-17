@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from functools import lru_cache
 from math import floor
 from typing import Iterable
 
@@ -13,6 +14,12 @@ from app.models import BuyFrequency
 
 class TradingCalendarUnavailable(RuntimeError):
     """Raised when the official XSHG calendar cannot serve a requested range."""
+
+
+@lru_cache(maxsize=None)
+def _xshg_calendar() -> xcals.ExchangeCalendar:
+    """Load the official XSHG calendar once per process (slow on first call)."""
+    return xcals.get_calendar("XSHG")
 
 
 def _as_dates(trading_days: Iterable[str | date]) -> list[date]:
@@ -30,7 +37,7 @@ def xshg_sessions(start: date, end: date) -> list[date]:
     if end < start:
         return []
     try:
-        calendar = xcals.get_calendar("XSHG")
+        calendar = _xshg_calendar()
         bounded_start = max(start, calendar.first_session.date())
         bounded_end = min(end, calendar.last_session.date())
         if bounded_end < bounded_start:
@@ -43,26 +50,6 @@ def xshg_sessions(start: date, end: date) -> list[date]:
         raise TradingCalendarUnavailable(
             f"XSHG 交易日历不可用：{start.isoformat()} 至 {end.isoformat()}"
         ) from exc
-
-
-def _expected_prev_session(day: date) -> date:
-    """Last Mon–Fri strictly before `day` (approximate T-1 calendar)."""
-    d = day - timedelta(days=1)
-    while d.weekday() >= 5:
-        d -= timedelta(days=1)
-    return d
-
-
-def _gap_has_missing_sessions(
-    latest_bar: date, today: date, warehouse: set[date]
-) -> bool:
-    """Any weekday strictly between latest_bar and today without a bar → not open yet."""
-    d = latest_bar + timedelta(days=1)
-    while d < today:
-        if d.weekday() < 5 and d not in warehouse:
-            return True
-        d += timedelta(days=1)
-    return False
 
 
 def is_trading_session(
@@ -84,32 +71,16 @@ def is_trading_session(
 
 
 def execution_calendar(
-    warehouse_days: Iterable[str | date],
+    warehouse_days: Iterable[str | date] | None = None,
     *,
     today: date,
-    latest_bar: date | None,
+    latest_bar: date | None = None,
     until: date | None = None,
 ) -> list[date]:
     """Official XSHG sessions for execution checks and forward planning."""
     del warehouse_days, latest_bar
     start = date(today.year - 1, 1, 1)
     return xshg_sessions(start, until or today)
-
-
-def planning_calendar(
-    warehouse_days: Iterable[str | date],
-    *,
-    today: date,
-    latest_bar: date | None,
-    until: date,
-) -> list[date]:
-    """Deprecated compatibility wrapper over the official XSHG calendar."""
-    return execution_calendar(
-        warehouse_days,
-        today=today,
-        latest_bar=latest_bar,
-        until=until,
-    )
 
 
 def _would_be_execution_day(
@@ -241,23 +212,6 @@ def is_execution_day(
         return resolved == today
     resolved = resolve_monthly_execution(today, monthly_day, days)
     return resolved == today
-
-
-def extend_calendar(
-    trading_days: Iterable[str | date],
-    *,
-    until: date,
-    from_date: date | None = None,
-) -> list[date]:
-    """Legacy helper — prefer execution_calendar / planning_calendar."""
-    today = date.today()
-    latest = _as_dates(trading_days)[-1] if trading_days else None
-    return planning_calendar(
-        trading_days,
-        today=today,
-        latest_bar=latest,
-        until=until,
-    )
 
 
 def next_execution_date(

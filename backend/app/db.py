@@ -9,6 +9,7 @@ from app.models import AppConfig, Portfolio, UserSettings
 from app.services.user_state import load_user_state, save_user_state
 
 _client: Any = None
+_config_cache: tuple[Path, int, AppConfig] | None = None
 
 
 def get_client() -> Any:
@@ -33,9 +34,19 @@ def get_db() -> Any:
 
 
 def load_app_config() -> AppConfig:
+    """Load symbols config, cached by path + mtime (cheap hot-path reads)."""
+    global _config_cache
     path = Path(get_settings().config_path)
+    try:
+        mtime_ns = path.stat().st_mtime_ns
+    except OSError:
+        mtime_ns = None
+    if _config_cache is not None and _config_cache[0] == path and _config_cache[1] == mtime_ns:
+        return _config_cache[2]
     with path.open(encoding="utf-8") as f:
-        return AppConfig.model_validate(json.load(f))
+        cfg = AppConfig.model_validate(json.load(f))
+    _config_cache = (path, mtime_ns, cfg)
+    return cfg
 
 
 async def ensure_indexes() -> None:

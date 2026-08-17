@@ -311,22 +311,29 @@ def _percentile_against_history(
 
     hist_dates = pd.to_datetime(hist["date"]).to_numpy(dtype="datetime64[ns]")
     hist_vals = hist[value_col].to_numpy(dtype=float)
+
+    # Precompute inclusive [start, end] window bounds for every bar at once
+    # (searchsorted instead of rebuilding a full-history boolean mask per date).
+    end_ts = pd.to_datetime(dates)
+    ends = end_ts.to_numpy(dtype="datetime64[ns]")
+    starts = (end_ts - pd.DateOffset(years=window_years)).to_numpy(
+        dtype="datetime64[ns]"
+    )
+    lo = np.searchsorted(hist_dates, starts, side="left")
+    hi = np.searchsorted(hist_dates, ends, side="right")
+
     out: list[float] = []
-    for raw_date, value in zip(dates, values):
+    for i, value in enumerate(values):
         if value is None or (isinstance(value, float) and np.isnan(value)):
             out.append(float("nan"))
             continue
-        end_ts = pd.Timestamp(raw_date)
-        end = np.datetime64(end_ts.to_datetime64())
-        start = np.datetime64(
-            (end_ts - pd.DateOffset(years=window_years)).to_datetime64()
-        )
-        mask = (hist_dates >= start) & (hist_dates <= end)
-        window_vals = hist_vals[mask]
-        if len(window_vals) < 5:
+        window = int(hi[i]) - int(lo[i])
+        if window < 5:
             out.append(float("nan"))
         else:
-            out.append(float((window_vals <= float(value)).mean()))
+            out.append(
+                float((hist_vals[int(lo[i]) : int(hi[i])] <= float(value)).mean())
+            )
     return out
 
 
@@ -1242,11 +1249,6 @@ async def backfill_idle_chunk(months: int = 1) -> dict[str, Any]:
         "processed": done,
         "data_status": market_store.data_status(),
     }
-
-
-async def get_latest_market(symbol: str) -> dict[str, Any] | None:
-    """Latest bar for charts / status (may include today if already synced)."""
-    return market_store.get_latest_bar(symbol)
 
 
 async def get_signal_market(symbol: str, signal_date: str | None = None) -> dict[str, Any] | None:

@@ -158,13 +158,19 @@ def apply_cash_pool(
     adjusted: list[EnsembleResult] = []
     changed = False
     for item in items:
-        data = item.model_dump()
         if item.action == "buy" and item.amount > 0:
-            data["amount"] = round(item.amount * scale, 2)
-            data["multiplier"] = round(item.multiplier * scale, 4)
-            data["reason"] = item.reason + f"（现金池调节 ×{scale:.2f}）"
+            adjusted.append(
+                item.model_copy(
+                    update={
+                        "amount": round(item.amount * scale, 2),
+                        "multiplier": round(item.multiplier * scale, 4),
+                        "reason": item.reason + f"（现金池调节 ×{scale:.2f}）",
+                    }
+                )
+            )
             changed = True
-        adjusted.append(EnsembleResult.model_validate(data))
+        else:
+            adjusted.append(item)
     return adjusted, changed
 
 
@@ -182,11 +188,17 @@ def normalize_amounts(
     scale = cap / total
     scaled: list[EnsembleResult] = []
     for item in items:
-        data = item.model_dump()
         if item.amount > 0:
-            data["amount"] = round(item.amount * scale, 2)
-            data["reason"] = item.reason + f"（已按预算上限缩放 ×{scale:.2f}）"
-        scaled.append(EnsembleResult.model_validate(data))
+            scaled.append(
+                item.model_copy(
+                    update={
+                        "amount": round(item.amount * scale, 2),
+                        "reason": item.reason + f"（已按预算上限缩放 ×{scale:.2f}）",
+                    }
+                )
+            )
+        else:
+            scaled.append(item)
     return scaled, True
 
 
@@ -213,7 +225,6 @@ def ensure_minimum_investment(
     adjusted: list[EnsembleResult] = []
     target_ids = {item.symbol for item in targets}
     for item in items:
-        data = item.model_dump()
         if item.symbol in target_ids:
             alloc_weight = (
                 item.target_weight / weight_sum
@@ -224,10 +235,17 @@ def ensure_minimum_investment(
             multiplier = round(
                 amount / max(base_amount * item.target_weight, 1e-9), 4
             )
-            data["action"] = "buy"
-            data["amount"] = amount
-            data["multiplier"] = multiplier
-            data["reason"] = item.reason + "；全组合触发暂停时保留底仓定投"
-            data["hard_veto"] = False
-        adjusted.append(EnsembleResult.model_validate(data))
+            adjusted.append(
+                item.model_copy(
+                    update={
+                        "action": "buy",
+                        "amount": amount,
+                        "multiplier": multiplier,
+                        "reason": item.reason + "；全组合触发暂停时保留底仓定投",
+                        "hard_veto": False,
+                    }
+                )
+            )
+        else:
+            adjusted.append(item)
     return adjusted, True

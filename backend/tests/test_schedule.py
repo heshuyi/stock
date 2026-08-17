@@ -7,12 +7,10 @@ import pytest
 from app.services.schedule import (
     TradingCalendarUnavailable,
     execution_calendar,
-    extend_calendar,
     is_execution_day,
     is_trading_session,
     next_execution_date,
     period_amount,
-    planning_calendar,
     resolve_monthly_execution,
     resolve_weekly_execution,
     weeks_with_trading_in_month,
@@ -128,21 +126,6 @@ def test_holiday_gap_not_provisional_trading_day():
         today=today,
         latest_bar=date(2026, 9, 30),
     )
-
-
-def test_planning_calendar_adds_weekday_beyond_last_bar():
-    cal = planning_calendar(
-        ["2026-07-30"],
-        today=date(2026, 7, 30),
-        latest_bar=date(2026, 7, 30),
-        until=date(2026, 8, 5),
-    )
-    assert date(2026, 7, 31) in cal
-
-
-def test_extend_calendar_legacy_wrapper():
-    cal = extend_calendar(["2026-07-30"], until=date(2026, 8, 5))
-    assert date(2026, 7, 30) in cal
 
 
 def test_next_execution_after_monthly_day_passed():

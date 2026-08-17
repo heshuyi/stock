@@ -143,15 +143,6 @@ def count_bars(symbol: str) -> int:
     return int(row["n"] if row else 0)
 
 
-def get_sync_meta(symbol: str) -> dict[str, Any] | None:
-    with connect() as conn:
-        row = conn.execute(
-            "SELECT * FROM sync_meta WHERE symbol=? LIMIT 1",
-            (symbol,),
-        ).fetchone()
-    return dict(row) if row else None
-
-
 def delete_symbol(symbol: str) -> dict[str, int]:
     """Remove a retired symbol's warehouse rows (bars, valuations, plans)."""
     ensure_store()
@@ -272,14 +263,23 @@ def upsert_records(symbol: str, records: list[dict[str, Any]]) -> int:
                 symbol,
             ),
         )
-        # mark months covered by these records
+        # mark months covered by these records (single grouped count query)
         months = sorted({r["date"][:7] for r in records})
-        for ym in months:
-            cnt = conn.execute(
-                "SELECT COUNT(*) FROM market_bars WHERE symbol=? AND date LIKE ?",
-                (symbol, f"{ym}%"),
-            ).fetchone()[0]
-            conn.execute(
+        if months:
+            placeholders = ",".join("?" for _ in months)
+            counts = {
+                row["ym"]: row["n"]
+                for row in conn.execute(
+                    f"""
+                    SELECT substr(date, 1, 7) AS ym, COUNT(*) AS n
+                    FROM market_bars
+                    WHERE symbol=? AND substr(date, 1, 7) IN ({placeholders})
+                    GROUP BY substr(date, 1, 7)
+                    """,
+                    [symbol, *months],
+                ).fetchall()
+            }
+            conn.executemany(
                 """
                 INSERT INTO backfill_months(symbol, year_month, status, rows, updated_at)
                 VALUES (?, ?, 'done', ?, ?)
@@ -287,7 +287,7 @@ def upsert_records(symbol: str, records: list[dict[str, Any]]) -> int:
                     status='done', rows=excluded.rows, updated_at=excluded.updated_at,
                     last_error=NULL
                 """,
-                (symbol, ym, cnt, now),
+                [(symbol, ym, int(counts.get(ym, 0)), now) for ym in months],
             )
     return len(records)
 
@@ -438,19 +438,6 @@ def materialize_valuation_metrics(
     return len(rows)
 
 
-def latest_valuation_asof(symbol: str) -> str | None:
-    with connect() as conn:
-        row = conn.execute(
-            """
-            SELECT MAX(date) AS valuation_asof
-            FROM valuation_observations
-            WHERE symbol=? AND (pe_ttm IS NOT NULL OR pb IS NOT NULL)
-            """,
-            (symbol,),
-        ).fetchone()
-    return str(row["valuation_asof"]) if row and row["valuation_asof"] else None
-
-
 def get_bar(symbol: str, as_of: str) -> dict[str, Any] | None:
     with connect() as conn:
         row = conn.execute(
@@ -570,27 +557,33 @@ def month_range(start: date, end: date) -> list[str]:
 
 
 def ensure_month_plan(symbol: str, start_ym: str = "1991-01") -> int:
-    """Create pending month slots from start_ym through current month."""
+    """Create pending month slots from start_ym through current month.
+
+    Batched: one SELECT of existing months + one executemany INSERT.
+    """
     start = date.fromisoformat(f"{start_ym}-01")
     end = date.today()
     now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    all_months = month_range(start, end)
     created = 0
     with connect() as conn:
-        for ym in month_range(start, end):
-            cur = conn.execute(
-                "SELECT 1 FROM backfill_months WHERE symbol=? AND year_month=?",
-                (symbol, ym),
-            ).fetchone()
-            if cur:
-                continue
-            conn.execute(
+        existing = {
+            row[0]
+            for row in conn.execute(
+                "SELECT year_month FROM backfill_months WHERE symbol=?",
+                (symbol,),
+            ).fetchall()
+        }
+        missing = [ym for ym in all_months if ym not in existing]
+        if missing:
+            conn.executemany(
                 """
                 INSERT INTO backfill_months(symbol, year_month, status, rows, updated_at)
                 VALUES (?, ?, 'pending', 0, ?)
                 """,
-                (symbol, ym, now),
+                [(symbol, ym, now) for ym in missing],
             )
-            created += 1
+            created = len(missing)
     return created
 
 
