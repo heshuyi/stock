@@ -40,6 +40,8 @@ export default function SettingsPage() {
           weekly_weekday: set.weekly_weekday ?? 1,
           monthly_day: set.monthly_day ?? 1,
           cash_pool_enabled: set.cash_pool_enabled ?? false,
+          growth_bear_policy: set.growth_bear_policy ?? "hard_veto",
+          growth_bear_mult: set.growth_bear_mult ?? 0.2,
         });
         const ids = sym.symbols.map((s) => s.id);
         const holdings = (ids.length ? ids : DEFAULT_SYMBOLS).map((id) => {
@@ -75,6 +77,12 @@ export default function SettingsPage() {
       settings.valuation_exit_percentile
     ) {
       localErrors.valuation_range = "估值武装线必须低于估值清仓线";
+    }
+    if (
+      settings.growth_bear_policy === "soft" &&
+      !(settings.growth_bear_mult > 0 && settings.growth_bear_mult < 1)
+    ) {
+      localErrors.growth_bear_mult = "空头买入倍数必须在 0 到 1 之间";
     }
     const targetWeights = settings.target_weights || {};
     const weightTotal = Object.values(targetWeights).reduce(
@@ -220,6 +228,61 @@ export default function SettingsPage() {
             </div>
           )}
 
+          <div className="space-y-1.5">
+            <Label htmlFor="growth-bear-policy">成长仓空头策略</Label>
+            <Select
+              value={settings.growth_bear_policy}
+              onValueChange={(value) =>
+                setSettings({
+                  ...settings,
+                  growth_bear_policy: value as "hard_veto" | "soft",
+                })
+              }
+            >
+              <SelectTrigger
+                id="growth-bear-policy"
+                className="h-11 w-full bg-white"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="hard_veto">
+                  防守（空头排列硬停，回避下跌段）
+                </SelectItem>
+                <SelectItem value="soft">追收益（空头软降频小额续投）</SelectItem>
+              </SelectContent>
+            </Select>
+            {settings.growth_bear_policy === "soft" && (
+              <div className="pt-1.5">
+                <Label htmlFor="growth-bear-mult">空头买入倍数（0–1）</Label>
+                <Input
+                  id="growth-bear-mult"
+                  type="number"
+                  step="0.05"
+                  min={0.05}
+                  max={0.95}
+                  aria-invalid={Boolean(fieldErrors.growth_bear_mult)}
+                  className="mt-1 h-10 bg-white"
+                  value={settings.growth_bear_mult}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      growth_bear_mult: Number(e.target.value),
+                    })
+                  }
+                />
+                {fieldErrors.growth_bear_mult && (
+                  <p className="mt-1 text-xs text-red-600">
+                    {fieldErrors.growth_bear_mult}
+                  </p>
+                )}
+              </div>
+            )}
+            <p className="text-xs text-ink/45">
+              作用于创业板200 / 科创50；回测显示该开关是当前策略最大的收益杠杆（防守更稳、追收益更高）
+            </p>
+          </div>
+
           <label className="flex min-h-11 items-center gap-3 text-sm sm:col-span-2">
             <input
               type="checkbox"
@@ -254,7 +317,7 @@ export default function SettingsPage() {
               }
             />
             <p className="text-xs text-ink/45">
-              以 36 个月预算为满额基准；启用时 0 表示现金池为空，最低按 0.35× 缩放
+              以 36 个月预算为满额基准；启用时 0 表示弹药为空，本期暂停买入（系数最低为 0）
             </p>
             {fieldErrors.cash && (
               <p className="text-xs text-red-600">{fieldErrors.cash}</p>

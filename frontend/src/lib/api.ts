@@ -27,6 +27,9 @@ export interface EnsembleItem {
 
 export type BuyFrequency = "daily" | "weekly" | "monthly";
 
+/** 成长仓空头排列策略：hard_veto=防守（硬停）/ soft=追收益（软降频） */
+export type GrowthBearPolicy = "hard_veto" | "soft";
+
 export interface Dashboard {
   date: string;
   base_amount: number;
@@ -92,6 +95,10 @@ export interface UserSettings {
   valuation_reduce_percentile: number;
   /** 全局止盈：估值清仓分位（0–1），覆盖各标的 profile 的 trail_exit */
   valuation_exit_percentile: number;
+  /** 成长仓空头策略：hard_veto=防守（硬停） / soft=追收益（软降频） */
+  growth_bear_policy: GrowthBearPolicy;
+  /** soft 模式下的空头买入倍数（0–1） */
+  growth_bear_mult: number;
 }
 
 export class ApiError extends Error {

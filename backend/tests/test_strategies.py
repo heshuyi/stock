@@ -337,6 +337,7 @@ def test_ensemble_uses_weighted_average_not_product():
             reason="未触发",
         ),
     ]
+    product = 1.8 * 0.55  # 0.99
     result = ensemble(
         symbol="HS300",
         name="沪深300",
@@ -348,12 +349,49 @@ def test_ensemble_uses_weighted_average_not_product():
         profile=CORE,
         weights=CORE.strategy_weights,
     )
-    expected = 0.7 * 1.8 + 0.3 * 0.55  # 1.425
-    product = 1.8 * 0.55  # 0.99
-    assert abs(result.multiplier - expected) < 1e-9
+    # weighted average is rescaled to the reachable cap: avg 1.425 → ×(2.0/1.56)
+    expected = (0.7 * 1.8 + 0.3 * 0.55) * (2.0 / (0.7 * 1.8 + 0.3 * 1.0))
+    assert abs(result.multiplier - expected) < 1e-3  # rounded to 4dp
     assert result.multiplier > product
     assert "加权平均" in result.reason
     assert "非相乘" in result.reason
+    assert "缩放" in result.reason
+
+
+def test_ensemble_scale_to_cap_can_be_disabled():
+    """scale_to_cap=False 保留纯加权平均语义（上限由 max_mult 直接钳制）。"""
+    signals = [
+        StrategySignal(
+            strategy="valuation",
+            symbol="HS300",
+            action="buy",
+            multiplier=1.8,
+            confidence=0.9,
+            reason="低估",
+        ),
+        StrategySignal(
+            strategy="trend",
+            symbol="HS300",
+            action="buy",
+            multiplier=0.55,
+            confidence=0.85,
+            reason="夹层",
+        ),
+    ]
+    profile = CORE.model_copy(update={"scale_to_cap": False})
+    result = ensemble(
+        symbol="HS300",
+        name="沪深300",
+        etf_code="510300",
+        target_weight=0.35,
+        signals=signals,
+        base_amount=10000,
+        profile=profile,
+        weights=profile.strategy_weights,
+    )
+    expected = 0.7 * 1.8 + 0.3 * 0.55  # 1.425
+    assert abs(result.multiplier - expected) < 1e-9
+    assert "缩放" not in result.reason
 
 
 def test_oversold_unlock_bypasses_hard_veto():
@@ -417,19 +455,148 @@ def test_valuation_trend_weighted_average():
         base_amount=10000,
         weights={"valuation": 0.6, "trend": 0.4},
     )
-    assert abs(result.multiplier - 0.8) < 1e-6
-    assert abs(result.amount - 3200) < 1e-6
+    # default profile: reachable ceiling 0.6*2.0+0.4*1.0=1.6 → scale 2.0/1.6
+    assert abs(result.multiplier - 1.0) < 1e-6
+    assert abs(result.amount - 4000) < 1e-6
+    # without cap scaling the raw weighted average is preserved
+    raw = ensemble(
+        symbol="X",
+        name="X",
+        etf_code="000",
+        target_weight=0.4,
+        signals=signals,
+        base_amount=10000,
+        weights={"valuation": 0.6, "trend": 0.4},
+        profile=StrategyProfile(scale_to_cap=False),
+    )
+    assert abs(raw.multiplier - 0.8) < 1e-6
+
+
+def test_max_mult_reachable_at_full_max():
+    """At full undervaluation + bull trend the rescaled average hits max_mult."""
+    signals = [
+        StrategySignal(
+            strategy="valuation", symbol="X", action="buy", multiplier=1.8, reason="a"
+        ),
+        StrategySignal(
+            strategy="trend", symbol="X", action="buy", multiplier=1.0, reason="b"
+        ),
+    ]
+    result = ensemble(
+        symbol="X",
+        name="X",
+        etf_code="000",
+        target_weight=0.4,
+        signals=signals,
+        base_amount=10000,
+        profile=CORE,
+        weights=CORE.strategy_weights,
+        max_mult=2.0,
+    )
+    assert abs(result.multiplier - 2.0) < 1e-9
+
+
+def test_valuation_uses_configurable_bands():
+    profile = CORE.model_copy(
+        update={"band_low": 0.1, "band_mid": 0.3, "band_high": 0.5}
+    )
+    assert valuation_signal("HS300", 0.05, 0.05, profile=profile).multiplier == 1.8
+    assert valuation_signal("HS300", 0.2, 0.2, profile=profile).multiplier == 1.4
+    assert valuation_signal("HS300", 0.4, 0.4, profile=profile).multiplier == 1.0
+    assert valuation_signal("HS300", 0.7, 0.7, profile=profile).multiplier == 0.5
+    # band_high must stay below pause_percentile
+    from app.models import StrategyProfile as _SP
+
+    try:
+        _SP.model_validate(
+            CORE.model_copy(update={"band_high": 0.95}).model_dump()
+        )
+        raise AssertionError("expected validation error")
+    except Exception:
+        pass
+
+
+def test_trend_bear_soft_mult_softens_hard_veto():
+    soft = GROWTH.model_copy(update={"bear_soft_mult": 0.2})
+    s = trend_signal("CYB200", price=90, ma_short=95, ma_long=110, profile=soft)
+    assert s.meta["trend_state"] == "bear"
+    assert s.meta["trend_break"] is False
+    assert s.meta["bear_soft"] is True
+    assert s.action == "buy"
+    assert abs(s.multiplier - 0.2) < 1e-9
+
+    result = ensemble(
+        symbol="CYB200",
+        name="创业板200",
+        etf_code="159572",
+        target_weight=0.15,
+        signals=[valuation_signal("CYB200", 0.3, 0.4, profile=soft), s],
+        base_amount=10000,
+        hard_veto_enabled=True,
+        profile=soft,
+        weights=soft.strategy_weights,
+    )
+    assert result.hard_veto is False
+    assert result.action == "buy"
+    assert result.amount > 0
+
+
+def test_ensemble_block_reason_locks_buy_but_allows_reduce():
+    buy_signals = [
+        StrategySignal(
+            strategy="valuation", symbol="X", action="buy", multiplier=1.0, reason="a"
+        ),
+        StrategySignal(
+            strategy="trend", symbol="X", action="buy", multiplier=1.0, reason="b"
+        ),
+    ]
+    locked = ensemble(
+        symbol="X",
+        name="X",
+        etf_code="000",
+        target_weight=0.4,
+        signals=buy_signals,
+        base_amount=10000,
+        block_reason="清仓止盈生效中，暂停新增",
+    )
+    assert locked.hard_veto is True
+    assert locked.action == "pause"
+    assert locked.amount == 0
+    assert "清仓止盈生效中" in locked.reason
+
+    reduce_signals = buy_signals + [
+        StrategySignal(
+            strategy="profit_taking",
+            symbol="X",
+            action="reduce",
+            multiplier=0.0,
+            reduce_ratio=1.0,
+            reason="清仓级减持",
+        )
+    ]
+    locked_reduce = ensemble(
+        symbol="X",
+        name="X",
+        etf_code="000",
+        target_weight=0.4,
+        signals=reduce_signals,
+        base_amount=10000,
+        block_reason="清仓止盈生效中，暂停新增",
+    )
+    assert locked_reduce.action == "reduce"
+    assert locked_reduce.reduce_ratio == 1.0
 
 
 def test_cash_pool_factor_and_scale():
     assert cash_pool_factor(0, 10000, 36) == 1.0
-    assert cash_pool_factor(0, 10000, 36, enabled=True) == 0.35
+    # empty dry powder → factor 0 (real ammunition gauge), not a 0.35 floor
+    assert cash_pool_factor(0, 10000, 36, enabled=True) == 0.0
     assert (
         abs(cash_pool_factor(360000, 10000, 36, enabled=True) - 1.0)
         < 1e-9
     )
     thin = cash_pool_factor(50000, 10000, 36, enabled=True)
-    assert thin < 0.5
+    assert 0 < thin < 0.5
     from app.models import EnsembleResult
 
     items = [
@@ -449,6 +616,43 @@ def test_cash_pool_factor_and_scale():
     assert applied is True
     assert scaled[0].amount == 400.0
     assert scaled[0].multiplier == 0.4
+
+
+def test_cash_pool_zero_halts_buys_not_reductions():
+    from app.models import EnsembleResult
+
+    items = [
+        EnsembleResult(
+            symbol="A",
+            name="A",
+            etf_code="1",
+            target_weight=0.5,
+            action="buy",
+            multiplier=1,
+            amount=1000,
+            reason="r",
+            strategies=[],
+        ),
+        EnsembleResult(
+            symbol="B",
+            name="B",
+            etf_code="2",
+            target_weight=0.5,
+            action="reduce",
+            multiplier=0,
+            amount=0,
+            reduce_ratio=0.5,
+            reason="止盈",
+            strategies=[],
+        ),
+    ]
+    adjusted, applied = apply_cash_pool(items, 0.0)
+    assert applied is True
+    assert adjusted[0].action == "hold"
+    assert adjusted[0].amount == 0
+    assert "弹药为空" in adjusted[0].reason
+    assert adjusted[1].action == "reduce"
+    assert adjusted[1].reduce_ratio == 0.5
 
 
 def test_normalize_cap():

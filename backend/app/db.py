@@ -75,6 +75,8 @@ def _default_settings(cfg: AppConfig) -> UserSettings:
         valuation_reduce_percentile=cfg.defaults.valuation_reduce_percentile,
         valuation_exit_percentile=cfg.defaults.valuation_exit_percentile,
         cash_pool_enabled=False,
+        growth_bear_policy=cfg.defaults.growth_bear_policy,
+        growth_bear_mult=cfg.defaults.growth_bear_mult,
         target_weights={s.id: s.target_weight for s in cfg.symbols},
     )
 
@@ -171,6 +173,10 @@ async def get_user_settings() -> UserSettings:
         doc["monthly_day"] = cfg.defaults.monthly_day
     if doc.get("cash_pool_enabled") is None:
         doc["cash_pool_enabled"] = False
+    if doc.get("growth_bear_policy") not in {"hard_veto", "soft"}:
+        doc["growth_bear_policy"] = cfg.defaults.growth_bear_policy
+    if doc.get("growth_bear_mult") is None:
+        doc["growth_bear_mult"] = cfg.defaults.growth_bear_mult
     return UserSettings.model_validate(doc)
 
 

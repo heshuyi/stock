@@ -123,11 +123,15 @@ def valuation_signal(
         tiers.append(0.0)
     band_note = f"{source_note}{mode_note}（{window_note}）p={p:.0%}"
 
-    if p < 0.20:
-        mult, action, reason = tiers[0], "buy", f"{band_note} <20%，低估加码"
-    elif p < 0.40:
+    # Configurable band boundaries (defaults preserve legacy 20%/40%/60%).
+    lo = float(profile.band_low)
+    mid = float(profile.band_mid)
+    hi = float(profile.band_high)
+    if p < lo:
+        mult, action, reason = tiers[0], "buy", f"{band_note} <{lo:.0%}，低估加码"
+    elif p < mid:
         mult, action, reason = tiers[1], "buy", f"{band_note}，偏低估值加码"
-    elif p < 0.60:
+    elif p < hi:
         mult, action, reason = tiers[2], "buy", f"{band_note}，合理估值标准定投"
     elif p < pause:
         mult, action, reason = tiers[3], "buy", f"{band_note}，偏高估值减额定投"

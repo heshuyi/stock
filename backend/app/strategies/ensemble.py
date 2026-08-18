@@ -13,6 +13,21 @@ def _clip(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
 
 
+def _theoretical_max(
+    weights: dict[str, float], profile: StrategyProfile
+) -> float:
+    """Highest multiplier the weighted average can reach given the profile.
+
+    Weighted average of (valuation max tier) and (trend bull) at their maxes —
+    this is the ceiling the configured ``max_mult`` must cover to be reachable.
+    """
+    w_val = float(weights.get("valuation", 0.0))
+    w_trend = float(weights.get("trend", 0.0))
+    max_val = max(profile.tier_mults) if profile.tier_mults else 1.0
+    max_trend = max(float(v) for v in profile.trend_mults.model_dump().values())
+    return w_val * max_val + w_trend * max_trend
+
+
 def ensemble(
     *,
     symbol: str,
@@ -25,12 +40,19 @@ def ensemble(
     weights: dict[str, float] | None = None,
     profile: StrategyProfile | None = None,
     max_mult: float = 2.0,
+    block_reason: str | None = None,
 ) -> EnsembleResult:
     """Merge valuation + trend with weighted average (not multiplication).
 
     Product rule: valuation sets the primary DCA size; trend only soft-scales.
     Hard veto (valuation pause / growth bear) zeroes the buy — do not encode
     veto as ``m_val * m_trend``. Profit-taking stays out of the buy weights.
+
+    ``block_reason`` is an external buy lock (e.g. profit-taking full-exit
+    stage still hot) — it vetoes new buys but never overrides a reduce signal.
+    When ``profile.scale_to_cap`` and the configured ``max_mult`` is higher
+    than the reachable weighted-average ceiling, the average is rescaled so
+    the cap genuinely binds at full undervaluation + bull trend.
     """
     profile = profile or StrategyProfile()
     wmap = weights or profile.strategy_weights or STRATEGY_WEIGHTS
@@ -46,6 +68,9 @@ def ensemble(
     trend_break = bool(trend and trend.meta.get("trend_break"))
     oversold_unlock = bool(trend and trend.meta.get("oversold_unlock"))
 
+    if block_reason:
+        hard_veto = True
+        veto_reasons.append(block_reason)
     if hard_veto_enabled:
         if valuation_missing and valuation:
             hard_veto = True
@@ -90,6 +115,14 @@ def ensemble(
         # Explicit weighted average — never m_val * m_trend for buy sizing.
         final_mult = _clip(numer / denom if denom else 0.0, 0.0, max_mult)
 
+        scale_note = ""
+        if profile.scale_to_cap and denom > 0:
+            ceiling = _theoretical_max(wmap, profile)
+            if ceiling > 1e-9 and max_mult > ceiling * (1 + 1e-9):
+                scale = max_mult / ceiling
+                final_mult = _clip(final_mult * scale, 0.0, max_mult)
+                scale_note = f"（按角色可达上限缩放 ×{scale:.3f}）"
+
         if any_reduce and max_reduce:
             action = "reduce"
             reason = (
@@ -110,6 +143,7 @@ def ensemble(
             ]
             reason = (
                 f"加权平均合成 {final_mult:.2f}（非相乘；{' + '.join(parts)}）"
+                f"{scale_note}"
             )
 
     amount = (
@@ -140,11 +174,15 @@ def cash_pool_factor(
     *,
     enabled: bool = False,
 ) -> float:
-    """Scale from tracked dry powder; disabled means no cash-pool adjustment."""
+    """Scale from tracked dry powder; disabled means no cash-pool adjustment.
+
+    Empty dry powder (``cash == 0``) yields factor 0 — the pool is a real
+    ammunition gauge, so an empty pool stops new buys entirely.
+    """
     if not enabled or base_amount <= 0 or reserve_months <= 0:
         return 1.0
     target = base_amount * reserve_months
-    return _clip(cash / target, 0.35, 1.25)
+    return _clip(cash / target, 0.0, 1.25)
 
 
 def apply_cash_pool(
@@ -154,8 +192,26 @@ def apply_cash_pool(
     """Scale buy amounts exactly by the supplied cash-pool factor."""
     if abs(pool_factor - 1.0) < 1e-9:
         return items, False
+    if pool_factor < 1e-9:
+        # Empty dry powder: no new buys, keep reduce/hold signals untouched.
+        adjusted: list[EnsembleResult] = []
+        for item in items:
+            if item.action == "buy" and item.amount > 0:
+                adjusted.append(
+                    item.model_copy(
+                        update={
+                            "action": "hold",
+                            "amount": 0.0,
+                            "multiplier": 0.0,
+                            "reason": item.reason + "（现金池为 0，弹药为空，本期暂停买入）",
+                        }
+                    )
+                )
+            else:
+                adjusted.append(item)
+        return adjusted, True
     scale = pool_factor
-    adjusted: list[EnsembleResult] = []
+    adjusted = []
     changed = False
     for item in items:
         if item.action == "buy" and item.amount > 0:

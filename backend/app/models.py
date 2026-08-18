@@ -31,12 +31,19 @@ class StrategyProfile(BaseModel):
     pe_weight: float = 0.55
     pb_weight: float = 0.45
     percentile_window: PercentileWindow = "5y"
-    pause_percentile: float = 0.80
-    # multipliers for p bands: <20%, 20-40%, 40-60%, 60-pause
+    pause_percentile: float = Field(default=0.80, gt=0, le=1)
+    # valuation percentile band boundaries (configurable; defaults keep legacy 20/40/60)
+    band_low: float = Field(default=0.20, ge=0, le=1)
+    band_mid: float = Field(default=0.40, ge=0, le=1)
+    band_high: float = Field(default=0.60, ge=0, le=1)
+    # multipliers for p bands: <band_low, band_low-mid, mid-high, high-pause
     tier_mults: list[float] = Field(default_factory=lambda: [2.0, 1.5, 1.0, 0.5])
     trend_hard_veto: bool = False
     trend_hysteresis: bool = False
     trend_mults: TrendMults = Field(default_factory=TrendMults)
+    # optional soft-growth mode: bear regime keeps buying at this multiplier
+    # instead of a hard veto (must be in (0, 1); None keeps the hard veto)
+    bear_soft_mult: float | None = Field(default=None, ge=0, le=1)
     oversold_unlock: bool = False
     oversold_p: float = 0.15
     oversold_bias: float = -0.12
@@ -48,6 +55,27 @@ class StrategyProfile(BaseModel):
     trail_drawdown: float = 0.08
     trail_exit_percentile: float = 0.90
     trail_disarm_gap: float = 0.05
+    # after a full-exit stage, buys stay locked until valuation cools below
+    # (exit_percentile - reentry_gap)
+    reentry_gap: float = Field(default=0.10, ge=0, le=1)
+    # when True, the weighted-average ensemble rescales so the configured
+    # max_mult is actually reachable at full undervaluation + bull trend
+    scale_to_cap: bool = True
+
+    @model_validator(mode="after")
+    def validate_bands(self) -> StrategyProfile:
+        if not (
+            0 <= self.band_low <= self.band_mid <= self.band_high
+            < self.pause_percentile
+        ):
+            raise ValueError(
+                "估值档位需满足 0 ≤ band_low ≤ band_mid ≤ band_high < pause_percentile"
+            )
+        if self.bear_soft_mult is not None and not 0 < self.bear_soft_mult < 1:
+            raise ValueError("bear_soft_mult 必须在 (0, 1) 之间（None 表示维持硬否决）")
+        if self.trail_arm_percentile >= self.trail_exit_percentile:
+            raise ValueError("估值武装线必须低于估值清仓线")
+        return self
 
 
 class SymbolConfig(BaseModel):
@@ -80,6 +108,8 @@ class StrategyDefaults(BaseModel):
     valuation_reduce_percentile: float = Field(default=0.80, ge=0, le=1)
     valuation_exit_percentile: float = Field(default=0.90, ge=0, le=1)
     cash_reserve_months: int = Field(default=36, ge=1, le=120)
+    growth_bear_policy: Literal["hard_veto", "soft"] = "hard_veto"
+    growth_bear_mult: float = Field(default=0.20, gt=0, lt=1)
     strategy_weights: dict[str, float] = Field(
         default_factory=lambda: {
             "valuation": 0.7,
@@ -185,6 +215,9 @@ class UserSettings(BaseModel):
     valuation_reduce_percentile: float = Field(default=0.80, ge=0, le=1)
     valuation_exit_percentile: float = Field(default=0.90, ge=0, le=1)
     cash_pool_enabled: bool = False
+    # 成长仓空头排列策略：hard_veto=防守（硬停）/ soft=追收益（按 growth_bear_mult 软降频）
+    growth_bear_policy: Literal["hard_veto", "soft"] = "hard_veto"
+    growth_bear_mult: float = Field(default=0.20, gt=0, lt=1)
 
     @field_validator(
         "base_amount",

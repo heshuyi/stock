@@ -53,6 +53,19 @@ def test_legacy_profit_take_return_is_ignored():
     assert "profit_take_return" not in settings.model_dump()
 
 
+def test_growth_bear_policy_and_mult_bounds():
+    settings = UserSettings()
+    assert settings.growth_bear_policy == "hard_veto"
+    assert settings.growth_bear_mult == 0.2
+    UserSettings(growth_bear_policy="soft", growth_bear_mult=0.3)
+    with pytest.raises(ValidationError):
+        UserSettings(growth_bear_policy="soft", growth_bear_mult=0)
+    with pytest.raises(ValidationError):
+        UserSettings(growth_bear_policy="soft", growth_bear_mult=1)
+    with pytest.raises(ValidationError):
+        UserSettings(growth_bear_policy="aggressive")
+
+
 def test_settings_api_returns_readable_422_detail():
     response = TestClient(app).put("/api/settings", json={"base_amount": -1})
     assert response.status_code == 422

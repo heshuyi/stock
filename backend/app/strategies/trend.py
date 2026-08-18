@@ -77,6 +77,18 @@ def trend_signal(
             f"{labels[state]}；超跌解封（估值p={valuation_p:.0%}，"
             f"Bias={bias:.1%}）按 {mult:.2f}× 小额吸纳"
         )
+    elif (
+        state == "bear"
+        and profile.trend_hard_veto
+        and profile.bear_soft_mult is not None
+    ):
+        # Optional soft-growth mode: keep small buys instead of a hard veto.
+        mult = float(profile.bear_soft_mult)
+        trend_break = False
+        action = "buy"
+        reason = (
+            f"{labels[state]}；成长仓软降频按 {mult:.2f}× 小额续投（非硬停）"
+        )
     elif mult <= 1e-9:
         action = "pause"
         reason = f"{labels[state]}，暂停新增资金"
@@ -103,6 +115,12 @@ def trend_signal(
             "trend_break": trend_break,
             "trend_hard_veto": profile.trend_hard_veto,
             "oversold_unlock": oversold_unlock,
+            "bear_soft": bool(
+                state == "bear"
+                and profile.trend_hard_veto
+                and profile.bear_soft_mult is not None
+                and not oversold_unlock
+            ),
             "valuation_p": valuation_p,
         },
     )
