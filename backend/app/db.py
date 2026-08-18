@@ -77,6 +77,10 @@ def _default_settings(cfg: AppConfig) -> UserSettings:
         cash_pool_enabled=False,
         growth_bear_policy=cfg.defaults.growth_bear_policy,
         growth_bear_mult=cfg.defaults.growth_bear_mult,
+        notify_enabled=False,
+        notify_url="",
+        notify_on_execution=True,
+        notify_on_signal_change=False,
         target_weights={s.id: s.target_weight for s in cfg.symbols},
     )
 
@@ -177,6 +181,14 @@ async def get_user_settings() -> UserSettings:
         doc["growth_bear_policy"] = cfg.defaults.growth_bear_policy
     if doc.get("growth_bear_mult") is None:
         doc["growth_bear_mult"] = cfg.defaults.growth_bear_mult
+    if doc.get("notify_enabled") is None:
+        doc["notify_enabled"] = False
+    if doc.get("notify_url") is None:
+        doc["notify_url"] = ""
+    if doc.get("notify_on_execution") is None:
+        doc["notify_on_execution"] = True
+    if doc.get("notify_on_signal_change") is None:
+        doc["notify_on_signal_change"] = False
     return UserSettings.model_validate(doc)
 
 

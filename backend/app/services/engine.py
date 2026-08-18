@@ -226,6 +226,7 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
             valuation_reduce_percentile=settings.valuation_reduce_percentile,
             valuation_exit_percentile=settings.valuation_exit_percentile,
             max_mult=max_mult,
+            rebalance_enabled=False,
         )
     )
     items = pipeline.items
@@ -249,7 +250,11 @@ async def compute_dashboard(as_of: str | None = None) -> DashboardResponse:
             updated_holdings.append(h)
     if _strategy_state_changed(portfolio.holdings, updated_holdings):
         await save_portfolio(
-            Portfolio(holdings=updated_holdings, cash=portfolio.cash)
+            Portfolio(
+                holdings=updated_holdings,
+                cash=portfolio.cash,
+                trades=portfolio.trades,
+            )
         )
 
     if valuation_issues:

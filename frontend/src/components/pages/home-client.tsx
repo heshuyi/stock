@@ -52,6 +52,31 @@ function OperationCard({ item }: { item: EnsembleItem }) {
           </div>
           <p className="mt-1 text-sm text-ink/60">
             目标仓位 {(item.target_weight * 100).toFixed(0)}%
+            {item.actual_weight != null && (
+              <>
+                {" · 实际 "}
+                <span
+                  className={
+                    item.weight_drift != null && Math.abs(item.weight_drift) >= 0.15
+                      ? item.weight_drift > 0
+                        ? "text-clay font-medium"
+                        : "text-steel font-medium"
+                      : ""
+                  }
+                >
+                  {(item.actual_weight * 100).toFixed(1)}%
+                  {item.weight_drift != null && Math.abs(item.weight_drift) >= 0.15 && (
+                    <>
+                      {" "}
+                      <span className="text-xs">
+                        ({item.weight_drift > 0 ? "+" : ""}
+                        {(item.weight_drift * 100).toFixed(1)}% 偏差)
+                      </span>
+                    </>
+                  )}
+                </span>
+              </>
+            )}
           </p>
         </div>
         <div className="text-left sm:text-right">
@@ -94,6 +119,20 @@ function OperationCard({ item }: { item: EnsembleItem }) {
         </div>
       </div>
 
+      {item.rebalance_reason && (
+        <div
+          className={`mt-3 rounded-lg border px-3 py-2 text-xs ${
+            item.weight_drift != null && item.weight_drift > 0
+              ? "border-clay/30 bg-clay/8 text-clay"
+              : "border-steel/30 bg-steel/8 text-steel"
+          }`}
+        >
+          <span className="font-semibold">
+            {item.weight_drift != null && item.weight_drift > 0 ? "⚠ 超配" : "↑ 低配"}
+          </span>{" "}
+          {item.rebalance_reason}
+        </div>
+      )}
       <div className="mt-3 rounded-lg border border-ink/8 bg-paper/70 px-3 py-2.5">
         <p className="text-xs font-medium uppercase tracking-wider text-ink/45">
           合成依据

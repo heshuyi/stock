@@ -53,6 +53,14 @@ def test_legacy_profit_take_return_is_ignored():
     assert "profit_take_return" not in settings.model_dump()
 
 
+def test_notify_settings_defaults():
+    settings = UserSettings()
+    assert settings.notify_enabled is False
+    assert settings.notify_url == ""
+    assert settings.notify_on_execution is True
+    assert settings.notify_on_signal_change is False
+
+
 def test_growth_bear_policy_and_mult_bounds():
     settings = UserSettings()
     assert settings.growth_bear_policy == "hard_veto"

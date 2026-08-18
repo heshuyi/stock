@@ -37,6 +37,9 @@ from app.models import AppConfig, Holding
 from app.services import market_store
 from app.services.strategy_pipeline import (
     PipelineInputs,
+    REBALANCE_MULT_CAP,
+    REBALANCE_REDUCE_COEFF,
+    REBALANCE_THRESHOLD,
     apply_growth_bear_policy,
     run_strategy_pipeline,
 )
@@ -304,6 +307,29 @@ def _resolve_growth_policy(args: argparse.Namespace) -> str:
     return "hard_veto"
 
 
+def _account_holdings_with_market_value(
+    account: Account, symbols: list, rows: dict[str, dict[str, object]]
+) -> list[Holding]:
+    """Like _account_holdings but also sets market_value from current prices."""
+    return [
+        Holding(
+            symbol=s.id,
+            shares=account.shares.get(s.id, 0.0),
+            cost_price=0.0,
+            market_value=(
+                account.shares.get(s.id, 0.0) * (_price(rows.get(s.id)) or 0.0)
+                if account.shares.get(s.id, 0.0) > 0
+                else None
+            ),
+            take_profit_stage=account.stages.get(s.id, 0),
+            trend_state=None,
+            trailing_armed=account.armed.get(s.id, False),
+            trail_peak_price=account.peaks.get(s.id),
+        )
+        for s in symbols
+    ]
+
+
 def run_backtest(
     args: argparse.Namespace, fee_bps: float, config: AppConfig | None = None
 ) -> dict[str, object]:
@@ -339,6 +365,7 @@ def run_backtest(
     yearly: dict[str, dict[str, float]] = {}
     fee = fee_bps / 10_000
     min_floor = float(getattr(args, "min_floor", 0.0) or 0.0)
+    rebalance_enabled: bool = bool(getattr(args, "rebalance", False))
 
     for index, current_date in enumerate(dates):
         current_rows = {
@@ -367,12 +394,15 @@ def run_backtest(
                     signal_date=signal_date,
                     base_amount=contribution,
                     target_weights=target_weights,
-                    holdings=_account_holdings(strategy, config.symbols),
+                    holdings=_account_holdings_with_market_value(
+                        strategy, config.symbols, signal_rows
+                    ),
                     hard_veto_enabled=True,
                     profit_take_enabled=True,
                     valuation_reduce_percentile=_VALUATION_REDUCE_PERCENTILE,
                     valuation_exit_percentile=_VALUATION_EXIT_PERCENTILE,
                     max_mult=_MAX_MULT,
+                    rebalance_enabled=rebalance_enabled,
                 )
             )
             items = out.items
@@ -595,6 +625,17 @@ def main() -> None:
         action="store_true",
         help="运行单因子敏感性扫描（其余参数保持基线）",
     )
+    parser.add_argument(
+        "--rebalance",
+        action="store_true",
+        default=False,
+        help=(
+            "研究开关：启用组合再平衡（默认关闭；研究参数 "
+            f"漂移>={int(REBALANCE_THRESHOLD * 100)}%%、"
+            f"低配加码<={REBALANCE_MULT_CAP:.2f}x、"
+            f"超配减仓系数 {REBALANCE_REDUCE_COEFF:.2f}），与基线对比输出"
+        ),
+    )
     args = parser.parse_args()
 
     if args.sensitivity:
@@ -634,6 +675,46 @@ def main() -> None:
         )
     if args.oos_start:
         _print_oos_report(baseline, args.oos_start)
+
+    if args.rebalance:
+        import copy as _copy
+        rebal_args = _copy.deepcopy(args)
+        rebal_args.rebalance = True
+        base_args = _copy.deepcopy(args)
+        base_args.rebalance = False
+        # baseline already ran with current args.rebalance; re-run both cleanly.
+        r_no = run_backtest(base_args, args.fee_bps)
+        r_rb = run_backtest(rebal_args, args.fee_bps)
+        print(
+            f"\n--- 组合再平衡对比（研究参数：阈值 {REBALANCE_THRESHOLD:.0%}，"
+            f"低配加码 ≤{REBALANCE_MULT_CAP:.2f}×，超配减仓系数 {REBALANCE_REDUCE_COEFF:.2f}；"
+            "默认不启用）---"
+        )
+        _print_metrics("无再平衡（基线）", r_no["strategy"])
+        _print_metrics("有再平衡", r_rb["strategy"])
+        delta_xirr = (
+            (r_rb["strategy"]["xirr"] or 0) - (r_no["strategy"]["xirr"] or 0)
+            if r_no["strategy"]["xirr"] is not None and r_rb["strategy"]["xirr"] is not None
+            else None
+        )
+        delta_dd = (
+            (r_rb["strategy"]["max_drawdown"] or 0) - (r_no["strategy"]["max_drawdown"] or 0)
+            if r_no["strategy"]["max_drawdown"] is not None
+            else None
+        )
+        if delta_xirr is not None:
+            print(
+                f"ΔXIRR={delta_xirr:+.2%} "
+                f"Δ最大回撤={delta_dd:+.2%}"
+                if delta_dd is not None
+                else f"ΔXIRR={delta_xirr:+.2%}"
+            )
+        print(
+            "注：再平衡为研究开关，默认关闭；回测含额外减仓手续费。"
+            "当前参数偏防守（回撤改善、XIRR 有代价），需样本外验证；"
+            "历史结果不构成投资建议。"
+        )
+
     policy = _resolve_growth_policy(args)
     if policy == "soft":
         print(f"\n成长仓空头策略：soft（软降频 {args.growth_bear_mult:.2f}×）")

@@ -154,6 +154,10 @@ class EnsembleResult(BaseModel):
     reason: str
     strategies: list[StrategySignal]
     hard_veto: bool = False
+    # 再平衡辅助字段（R8，仅有漂移时填充）
+    actual_weight: float | None = None          # 当日实际持仓权重
+    weight_drift: float | None = None           # 实际 − 目标（正=超配，负=低配）
+    rebalance_reason: str | None = None         # 再平衡说明文字
 
 
 class Holding(BaseModel):
@@ -165,8 +169,12 @@ class Holding(BaseModel):
     trend_state: TrendState | None = None
     trailing_armed: bool = False
     trail_peak_price: float | None = None
+    # 累计已收现金分红（把盈亏还原为含分红的总回报口径）
+    dividends_received: float = Field(default=0, ge=0, le=1_000_000_000_000)
 
-    @field_validator("shares", "cost_price", "market_value", mode="before")
+    @field_validator(
+        "shares", "cost_price", "market_value", "dividends_received", mode="before"
+    )
     @classmethod
     def validate_financial_value(cls, value: Any, info: ValidationInfo) -> Any:
         if value is None and info.field_name == "market_value":
@@ -175,6 +183,7 @@ class Holding(BaseModel):
             "shares": ("份额", 1_000_000_000_000),
             "cost_price": ("成本价", 10_000_000),
             "market_value": ("市值", 1_000_000_000_000),
+            "dividends_received": ("累计分红", 1_000_000_000_000),
         }
         if isinstance(value, (int, float)):
             label, upper = limits[info.field_name]
@@ -183,9 +192,32 @@ class Holding(BaseModel):
         return value
 
 
+TradeKind = Literal["deposit", "buy", "sell", "dividend"]
+
+
+class TradeInput(BaseModel):
+    """A single manual ledger entry to reconcile the tracked position."""
+
+    symbol: str
+    kind: TradeKind
+    date: str | None = None
+    # deposit: amount 入金；buy: amount 花费金额 + price；sell: shares 或 ratio + price
+    # dividend: amount 现金分红 + reinvest 是否红利再投（再投需 price）
+    amount: float | None = Field(default=None, ge=0)
+    price: float | None = Field(default=None, ge=0)
+    shares: float | None = Field(default=None, ge=0)
+    ratio: float | None = Field(default=None, gt=0, le=1)
+    reinvest: bool = False
+
+
+class TradeRecord(TradeInput):
+    applied_at: str = ""
+
+
 class Portfolio(BaseModel):
     holdings: list[Holding] = Field(default_factory=list)
     cash: float = Field(default=0, ge=0, le=1_000_000_000_000)
+    trades: list[TradeRecord] = Field(default_factory=list)
 
     @field_validator("cash", mode="before")
     @classmethod
@@ -218,6 +250,11 @@ class UserSettings(BaseModel):
     # 成长仓空头排列策略：hard_veto=防守（硬停）/ soft=追收益（按 growth_bear_mult 软降频）
     growth_bear_policy: Literal["hard_veto", "soft"] = "hard_veto"
     growth_bear_mult: float = Field(default=0.20, gt=0, lt=1)
+    # 提醒推送（R7）
+    notify_enabled: bool = False
+    notify_url: str = ""
+    notify_on_execution: bool = True
+    notify_on_signal_change: bool = False
 
     @field_validator(
         "base_amount",

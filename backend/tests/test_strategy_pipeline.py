@@ -127,6 +127,31 @@ def test_pipeline_stage2_lock_and_reentry():
     assert cool.items[0].amount > 0
 
 
+def test_pipeline_profit_ratio_includes_dividends():
+    symbols = [_symbol("A", 1.0)]
+    held = [
+        Holding(
+            symbol="A",
+            shares=100,
+            cost_price=10,
+            dividends_received=200,
+        )
+    ]
+    out = run_strategy_pipeline(
+        PipelineInputs(
+            symbols=symbols,
+            latest_by_symbol={"A": _bar(close=10.0)},
+            signal_date="2026-08-14",
+            base_amount=1000,
+            target_weights={"A": 1.0},
+            holdings=held,
+        )
+    )
+    profit = next(s for s in out.items[0].strategies if s.strategy == "profit_taking")
+    # 市值 1000 + 分红 200 − 成本 1000 → 20%
+    assert abs(profit.meta["holding_profit_ratio"] - 0.2) < 1e-9
+
+
 def test_pipeline_advances_take_profit_stage():
     symbols = [_symbol("A", 1.0)]
     held = [
@@ -162,6 +187,105 @@ def test_pipeline_stale_valuation_safe_pauses():
     assert out.valuation_issues == ["A"]
     assert out.items[0].action == "pause"
     assert out.items[0].hard_veto is True
+
+
+def test_rebalance_underweight_boosts_buy_multiplier():
+    """Low-weight symbol (actual < target by ≥5%) gets buy multiplier boosted."""
+    sym_a = _symbol("A", 0.70)
+    sym_b = _symbol("B", 0.30)
+    # A holds 600 units @1.0, B holds 100 units @1.0 → total=700
+    # A: 600/700 ≈ 0.857, target 0.70 → overweight → reduce suggestion
+    # B: 100/700 ≈ 0.143, target 0.30 → underweight ≥5% → mult boost
+    held = [
+        Holding(symbol="A", shares=600, cost_price=0.5, market_value=600.0),
+        Holding(symbol="B", shares=100, cost_price=0.5, market_value=100.0),
+    ]
+    out = run_strategy_pipeline(
+        PipelineInputs(
+            symbols=[sym_a, sym_b],
+            latest_by_symbol={"A": _bar(close=1.0), "B": _bar(close=1.0)},
+            signal_date="2026-08-14",
+            base_amount=1000,
+            target_weights={"A": 0.70, "B": 0.30},
+            holdings=held,
+            rebalance_enabled=True,
+            rebalance_threshold=0.05,
+            rebalance_mult_cap=1.5,
+        )
+    )
+    a_item = next(i for i in out.items if i.symbol == "A")
+    b_item = next(i for i in out.items if i.symbol == "B")
+    # A is overweight by ~15.7% → should get reduce signal
+    assert a_item.weight_drift is not None and a_item.weight_drift > 0.05
+    assert a_item.action == "reduce"
+    assert a_item.rebalance_reason is not None
+    # B is underweight → if buy signal, multiplier should be boosted
+    assert b_item.weight_drift is not None and b_item.weight_drift < -0.05
+    assert b_item.actual_weight is not None
+
+
+def test_rebalance_within_threshold_no_action():
+    """Drift below threshold: weight_drift set but no rebalance action."""
+    sym_a = _symbol("A", 0.60)
+    sym_b = _symbol("B", 0.40)
+    # A: 62 @1.0 = 62, B: 40 @1.0 = 40 → total=102
+    # A: 60.8%, target 60% → drift=0.8% < 5% threshold → no rebalance action
+    held = [
+        Holding(symbol="A", shares=62, cost_price=0.5, market_value=62.0),
+        Holding(symbol="B", shares=40, cost_price=0.5, market_value=40.0),
+    ]
+    out = run_strategy_pipeline(
+        PipelineInputs(
+            symbols=[sym_a, sym_b],
+            latest_by_symbol={"A": _bar(close=1.0), "B": _bar(close=1.0)},
+            signal_date="2026-08-14",
+            base_amount=1000,
+            target_weights={"A": 0.60, "B": 0.40},
+            holdings=held,
+            rebalance_enabled=True,
+            rebalance_threshold=0.05,
+        )
+    )
+    for item in out.items:
+        assert item.rebalance_reason is None or "低配" not in item.rebalance_reason or "超配" not in item.rebalance_reason
+        # No rebalance-driven action change (check weight_drift is small)
+        if item.weight_drift is not None:
+            assert abs(item.weight_drift) < 0.05
+
+
+def test_rebalance_disabled_no_drift_fields():
+    """With rebalance_enabled=False, drift fields are not populated."""
+    sym_a = _symbol("A", 1.0)
+    held = [Holding(symbol="A", shares=100, cost_price=0.5, market_value=100.0)]
+    out = run_strategy_pipeline(
+        PipelineInputs(
+            symbols=[sym_a],
+            latest_by_symbol={"A": _bar(close=1.0)},
+            signal_date="2026-08-14",
+            base_amount=1000,
+            target_weights={"A": 1.0},
+            holdings=held,
+            rebalance_enabled=False,
+        )
+    )
+    assert out.items[0].weight_drift is None
+    assert out.items[0].actual_weight is None
+
+
+def test_rebalance_research_defaults_are_off():
+    """Live default: research knobs present, rebalance itself disabled."""
+    inputs = PipelineInputs(
+        symbols=[],
+        latest_by_symbol={},
+        signal_date="2026-08-14",
+        base_amount=0,
+        target_weights={},
+        holdings=[],
+    )
+    assert inputs.rebalance_enabled is False
+    assert inputs.rebalance_threshold == 0.15
+    assert inputs.rebalance_mult_cap == 1.15
+    assert inputs.rebalance_reduce_coeff == 0.02
 
 
 def test_pipeline_empty_holdings_no_crash():

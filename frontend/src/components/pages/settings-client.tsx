@@ -4,6 +4,8 @@ import { useEffect, useState } from "react";
 import {
   Portfolio,
   SymbolInfo,
+  TradeInput,
+  TradeKind,
   UserSettings,
   ApiError,
   api,
@@ -29,6 +31,17 @@ export default function SettingsPage() {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [tradeForm, setTradeForm] = useState<{
+    symbol: string;
+    kind: TradeKind;
+    amount: string;
+    price: string;
+    shares: string;
+    ratio: string;
+    reinvest: boolean;
+  }>({ symbol: "HS300", kind: "deposit", amount: "", price: "", shares: "", ratio: "", reinvest: false });
+  const [tradeMsg, setTradeMsg] = useState<string | null>(null);
+  const [tradeErr, setTradeErr] = useState<string | null>(null);
 
   useEffect(() => {
     Promise.all([api.symbols(), api.settings(), api.portfolio()])
@@ -42,6 +55,10 @@ export default function SettingsPage() {
           cash_pool_enabled: set.cash_pool_enabled ?? false,
           growth_bear_policy: set.growth_bear_policy ?? "hard_veto",
           growth_bear_mult: set.growth_bear_mult ?? 0.2,
+          notify_enabled: set.notify_enabled ?? false,
+          notify_url: set.notify_url ?? "",
+          notify_on_execution: set.notify_on_execution ?? true,
+          notify_on_signal_change: set.notify_on_signal_change ?? false,
         });
         const ids = sym.symbols.map((s) => s.id);
         const holdings = (ids.length ? ids : DEFAULT_SYMBOLS).map((id) => {
@@ -56,6 +73,7 @@ export default function SettingsPage() {
               trend_state: null,
               trailing_armed: false,
               trail_peak_price: null,
+              dividends_received: 0,
             }
           );
         });
@@ -63,6 +81,61 @@ export default function SettingsPage() {
       })
       .catch((e) => setError(e instanceof Error ? e.message : "加载失败"));
   }, []);
+
+  const TRADE_KIND_LABELS: Record<TradeKind, string> = {
+    deposit: "入金（增加可支配储备）",
+    buy: "买入",
+    sell: "卖出",
+    dividend: "分红",
+  };
+
+  async function handleTrade() {
+    if (!portfolio) return;
+    setTradeMsg(null);
+    setTradeErr(null);
+    const body: TradeInput = {
+      symbol: tradeForm.symbol,
+      kind: tradeForm.kind,
+      reinvest: tradeForm.reinvest,
+    };
+    const amt = tradeForm.amount === "" ? null : Number(tradeForm.amount);
+    const price = tradeForm.price === "" ? null : Number(tradeForm.price);
+    const shares = tradeForm.shares === "" ? null : Number(tradeForm.shares);
+    const ratio = tradeForm.ratio === "" ? null : Number(tradeForm.ratio);
+    if (amt != null) body.amount = amt;
+    if (price != null) body.price = price;
+    if (shares != null) body.shares = shares;
+    if (ratio != null) body.ratio = ratio;
+    try {
+      const res = await api.saveTrade(body);
+      const ids = (symbols.length ? symbols.map((s) => s.id) : DEFAULT_SYMBOLS);
+      const holdings = ids.map((id) => {
+        const existing = res.portfolio.holdings.find((h) => h.symbol === id);
+        return (
+          existing || {
+            symbol: id,
+            shares: 0,
+            cost_price: 0,
+            market_value: null,
+            take_profit_stage: 0,
+            trend_state: null,
+            trailing_armed: false,
+            trail_peak_price: null,
+            dividends_received: 0,
+          }
+        );
+      });
+      setPortfolio({ ...res.portfolio, holdings });
+      setTradeMsg(`已登记${TRADE_KIND_LABELS[tradeForm.kind]}（${tradeForm.symbol}）`);
+      setTradeForm({ ...tradeForm, amount: "", price: "", shares: "", ratio: "" });
+    } catch (e) {
+      if (e instanceof ApiError) {
+        setTradeErr(Object.values(e.fieldErrors).join("；") || "登记失败");
+      } else {
+        setTradeErr(e instanceof Error ? e.message : "登记失败");
+      }
+    }
+  }
 
   async function saveAll() {
     if (!settings || !portfolio) return;
@@ -570,7 +643,7 @@ export default function SettingsPage() {
             return (
               <div
                 key={h.symbol}
-                className="grid grid-cols-2 gap-2 rounded-lg border border-ink/8 bg-paper/40 p-3 sm:grid-cols-4"
+                className="grid grid-cols-2 gap-2 rounded-lg border border-ink/8 bg-paper/40 p-3 sm:grid-cols-5"
               >
                 <p className="col-span-2 text-sm font-medium sm:col-span-4">
                   {name}
@@ -675,9 +748,246 @@ export default function SettingsPage() {
                     </SelectContent>
                   </Select>
                 </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor={`div-${h.symbol}`}>累计分红（元）</Label>
+                  <Input
+                    id={`div-${h.symbol}`}
+                    type="number"
+                    min={0}
+                    max={1000000000000}
+                    className="h-11 bg-white"
+                    value={h.dividends_received ?? 0}
+                    onChange={(e) => {
+                      const next = [...portfolio.holdings];
+                      next[idx] = {
+                        ...h,
+                        dividends_received: Number(e.target.value),
+                      };
+                      setPortfolio({ ...portfolio, holdings: next });
+                    }}
+                  />
+                  <p className="text-xs text-ink/45">
+                    计入盈亏（市值+分红−成本）
+                  </p>
+                </div>
               </div>
             );
           })}
+        </div>
+      </section>
+
+      <section className="mt-6 rounded-xl border border-ink/10 bg-white/70 p-4 sm:p-5">
+        <h2 className="font-display text-xl">对账登记</h2>
+        <p className="mt-1 text-xs text-ink/50">
+          登记真实执行的入金 / 买入 / 卖出 / 分红，自动演进份额、成本、现金与累计分红，并写入台账
+        </p>
+        <div className="mt-4 grid gap-3 sm:grid-cols-6">
+          <div className="space-y-1.5 sm:col-span-2">
+            <Label htmlFor="trade-symbol">标的</Label>
+            <Select
+              value={tradeForm.symbol}
+              onValueChange={(v) => setTradeForm({ ...tradeForm, symbol: v })}
+            >
+              <SelectTrigger id="trade-symbol" className="h-11 w-full bg-white">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {symbols.map((s) => (
+                  <SelectItem key={s.id} value={s.id}>
+                    {symbolLabel(s.name, s.etf_code, s.id)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="trade-kind">类型</Label>
+            <Select
+              value={tradeForm.kind}
+              onValueChange={(v) => setTradeForm({ ...tradeForm, kind: v as TradeKind })}
+            >
+              <SelectTrigger id="trade-kind" className="h-11 w-full bg-white">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {(Object.keys(TRADE_KIND_LABELS) as TradeKind[]).map((k) => (
+                  <SelectItem key={k} value={k}>
+                    {TRADE_KIND_LABELS[k]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          {(tradeForm.kind === "deposit" || tradeForm.kind === "buy" || tradeForm.kind === "dividend") && (
+            <div className="space-y-1.5">
+              <Label htmlFor="trade-amount">
+                {tradeForm.kind === "deposit" ? "入金金额（元）" : "金额（元）"}
+              </Label>
+              <Input
+                id="trade-amount"
+                type="number"
+                min={0}
+                className="h-11 bg-white"
+                placeholder="0"
+                value={tradeForm.amount}
+                onChange={(e) =>
+                  setTradeForm({ ...tradeForm, amount: e.target.value })
+                }
+              />
+            </div>
+          )}
+          {(tradeForm.kind === "buy" ||
+            tradeForm.kind === "sell" ||
+            (tradeForm.kind === "dividend" && tradeForm.reinvest)) && (
+            <div className="space-y-1.5">
+              <Label htmlFor="trade-price">成交价</Label>
+              <Input
+                id="trade-price"
+                type="number"
+                min={0}
+                className="h-11 bg-white"
+                placeholder="ETF 价格"
+                value={tradeForm.price}
+                onChange={(e) =>
+                  setTradeForm({ ...tradeForm, price: e.target.value })
+                }
+              />
+            </div>
+          )}
+          {tradeForm.kind === "sell" && (
+            <>
+              <div className="space-y-1.5">
+                <Label htmlFor="trade-shares">卖出份额</Label>
+                <Input
+                  id="trade-shares"
+                  type="number"
+                  min={0}
+                  className="h-11 bg-white"
+                  placeholder="份额或留空用比例"
+                  value={tradeForm.shares}
+                  onChange={(e) =>
+                    setTradeForm({ ...tradeForm, shares: e.target.value })
+                  }
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="trade-ratio">卖出比例（0–1）</Label>
+                <Input
+                  id="trade-ratio"
+                  type="number"
+                  step="0.05"
+                  min={0}
+                  max={1}
+                  className="h-11 bg-white"
+                  placeholder="如 0.5"
+                  value={tradeForm.ratio}
+                  onChange={(e) =>
+                    setTradeForm({ ...tradeForm, ratio: e.target.value })
+                  }
+                />
+              </div>
+            </>
+          )}
+          {tradeForm.kind === "dividend" && (
+            <label className="flex min-h-11 items-center gap-2 text-sm sm:col-span-3">
+              <input
+                type="checkbox"
+                className="h-5 w-5 shrink-0 accent-moss"
+                checked={tradeForm.reinvest}
+                onChange={(e) =>
+                  setTradeForm({ ...tradeForm, reinvest: e.target.checked })
+                }
+              />
+              红利再投（按成交价买入份额，成本不变）
+            </label>
+          )}
+          <div className="flex items-center gap-3 sm:col-span-6">
+            <Button type="button" onClick={handleTrade} className="h-11 bg-moss text-white hover:bg-moss/90">
+              登记
+            </Button>
+            {tradeMsg && <p className="text-sm text-moss">{tradeMsg}</p>}
+            {tradeErr && <p className="text-sm text-red-600">{tradeErr}</p>}
+          </div>
+        </div>
+        {portfolio.trades && portfolio.trades.length > 0 && (
+          <div className="mt-4">
+            <h3 className="text-sm font-semibold text-ink/70">最近台账</h3>
+            <ul className="mt-2 max-h-48 space-y-1 overflow-auto text-xs text-ink/60">
+              {[...portfolio.trades].reverse().map((t, i) => (
+                <li
+                  key={i}
+                  className="rounded border border-ink/8 bg-paper/40 px-2 py-1"
+                >
+                  {t.applied_at.slice(0, 10)} · {t.symbol} ·{" "}
+                  {TRADE_KIND_LABELS[t.kind]}
+                  {t.amount != null && ` · ¥${t.amount.toLocaleString("zh-CN")}`}
+                  {t.price != null && ` · @${t.price}`}
+                  {t.reinvest && " · 红利再投"}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </section>
+
+      <section className="mt-6 rounded-xl border border-ink/10 bg-white/70 p-4 sm:p-5">
+        <h2 className="font-display text-xl">提醒推送</h2>
+        <p className="mt-1 text-xs text-ink/50">
+          后台 worker 每日同步后，通过 Webhook 推送信号（Server酱 / 钉钉 / 企业微信均可）
+        </p>
+        <div className="mt-4 grid gap-4 sm:grid-cols-2">
+          <label className="flex min-h-11 items-center gap-3 text-sm sm:col-span-2">
+            <input
+              type="checkbox"
+              className="h-5 w-5 shrink-0 accent-moss"
+              checked={settings.notify_enabled}
+              onChange={(e) =>
+                setSettings({ ...settings, notify_enabled: e.target.checked })
+              }
+            />
+            启用提醒推送
+          </label>
+          <div className="space-y-1.5 sm:col-span-2">
+            <Label htmlFor="notify-url">Webhook 地址</Label>
+            <Input
+              id="notify-url"
+              type="url"
+              disabled={!settings.notify_enabled}
+              className="h-11 bg-white"
+              placeholder="https://sctapi.ftqq.com/... 或 https://oapi.dingtalk.com/robot/send?access_token=..."
+              value={settings.notify_url}
+              onChange={(e) =>
+                setSettings({ ...settings, notify_url: e.target.value })
+              }
+            />
+          </div>
+          <label className="flex min-h-11 items-center gap-3 text-sm">
+            <input
+              type="checkbox"
+              className="h-5 w-5 shrink-0 accent-moss"
+              disabled={!settings.notify_enabled}
+              checked={settings.notify_on_execution}
+              onChange={(e) =>
+                setSettings({ ...settings, notify_on_execution: e.target.checked })
+              }
+            />
+            执行日有买入 / 减仓时提醒
+          </label>
+          <label className="flex min-h-11 items-center gap-3 text-sm">
+            <input
+              type="checkbox"
+              className="h-5 w-5 shrink-0 accent-moss"
+              disabled={!settings.notify_enabled}
+              checked={settings.notify_on_signal_change}
+              onChange={(e) =>
+                setSettings({
+                  ...settings,
+                  notify_on_signal_change: e.target.checked,
+                })
+              }
+            />
+            信号相对昨日变化时提醒
+          </label>
         </div>
       </section>
 

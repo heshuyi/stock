@@ -6,9 +6,10 @@ import asyncio
 import logging
 
 from app.config import get_settings
-from app.db import ensure_indexes, seed_symbols_and_settings
+from app.db import ensure_indexes, get_user_settings, seed_symbols_and_settings
 from app.services.engine import compute_dashboard
 from app.services.market_data import backfill_idle_chunk, hydrate_db_from_disk_cache, sync_all
+from app.services.notify import build_payload, send, should_notify
 from app.services import market_store
 
 logging.basicConfig(
@@ -29,6 +30,14 @@ async def run_sync() -> None:
         dash.total_buy_amount,
         len(dash.items),
     )
+    try:
+        settings = await get_user_settings()
+        should, reason = await should_notify(dash, settings)
+        if should:
+            ok = await send(settings.notify_url, build_payload(dash))
+            logger.info("Notification sent reason=%s ok=%s", reason, ok)
+    except Exception:
+        logger.exception("Notification step failed")
 
 
 async def run_idle_backfill(months: int = 3) -> None:

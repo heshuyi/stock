@@ -19,6 +19,13 @@ from app.strategies.profit_taking import profit_taking_signal
 from app.strategies.trend import trend_signal
 from app.strategies.valuation import valuation_signal
 
+# Research-only rebalancing knobs (default OFF on the live dashboard).
+# Full-sample scan vs no-rebalance baseline: threshold 15% / reduce 0.02 /
+# buy cap 1.15× cut max drawdown ~1.7pp at a ~0.34pp XIRR cost. Not default.
+REBALANCE_THRESHOLD = 0.15
+REBALANCE_MULT_CAP = 1.15
+REBALANCE_REDUCE_COEFF = 0.02
+
 
 def apply_growth_bear_policy(
     symbols: list[SymbolConfig],
@@ -65,6 +72,11 @@ class PipelineInputs:
     valuation_exit_percentile: float = 0.90
     pool_factor: float = 1.0
     max_mult: float = 2.0
+    # Research switch: live engine keeps this False; backtest --rebalance turns it on.
+    rebalance_enabled: bool = False
+    rebalance_threshold: float = REBALANCE_THRESHOLD
+    rebalance_mult_cap: float = REBALANCE_MULT_CAP
+    rebalance_reduce_coeff: float = REBALANCE_REDUCE_COEFF
 
 
 @dataclass
@@ -88,6 +100,30 @@ def run_strategy_pipeline(inputs: PipelineInputs) -> PipelineOutput:
     updated_holdings: list[Holding] = []
     valuation_issues: list[str] = []
     missing: list[str] = []
+
+    # Pre-compute "actual weights" from tracked shares at current T-1 mark price.
+    actual_values: dict[str, float] = {}
+    total_actual_value = 0.0
+    if inputs.rebalance_enabled:
+        for sym in inputs.symbols:
+            latest = inputs.latest_by_symbol.get(sym.id)
+            if not latest:
+                continue
+            holding = hmap.get(sym.id)
+            shares = float(holding.shares) if holding else 0.0
+            if shares <= 0:
+                # still include as 0-value weight; doesn't affect total
+                actual_values[sym.id] = 0.0
+                continue
+            price = (
+                float(latest["etf_close"])
+                if latest.get("etf_close") is not None
+                else float(latest.get("close") or 0)
+            )
+            if price and price > 0:
+                v = shares * price
+                actual_values[sym.id] = v
+                total_actual_value += v
 
     for sym in inputs.symbols:
         latest = inputs.latest_by_symbol.get(sym.id)
@@ -124,9 +160,12 @@ def run_strategy_pipeline(inputs: PipelineInputs) -> PipelineOutput:
             else:
                 holding_price = None
             if holding_price is not None:
-                profit_ratio = (
-                    holding_price - holding.cost_price
-                ) / holding.cost_price
+                # 含分红的总回报口径：市值 + 累计分红 − 成本
+                cost_basis = holding.cost_price * holding.shares
+                total_value = (
+                    holding_price * holding.shares + holding.dividends_received
+                )
+                profit_ratio = (total_value - cost_basis) / cost_basis
 
         strategy_signals = []
         valuation_p = None
@@ -221,6 +260,91 @@ def run_strategy_pipeline(inputs: PipelineInputs) -> PipelineOutput:
             max_mult=inputs.max_mult,
             block_reason=block_reason,
         )
+        if inputs.rebalance_enabled and total_actual_value > 0:
+            tw = float(inputs.target_weights.get(sym.id, sym.target_weight))
+            av = actual_values.get(sym.id, 0.0)
+            aw = av / total_actual_value if total_actual_value > 0 else 0.0
+            drift = aw - tw
+            if abs(drift) >= inputs.rebalance_threshold:
+                if drift < 0:
+                    # Low-weight: boost buy multiplier (only when base signal is buy).
+                    if result.action == "buy" and result.amount > 0 and tw > 0:
+                        deficit = tw - aw
+                        factor = 1.0 + deficit / max(tw, 1e-9)
+                        factor = min(inputs.rebalance_mult_cap, max(1.0, factor))
+                        new_mult = min(inputs.max_mult, result.multiplier * factor)
+                        new_amount = round(inputs.base_amount * tw * new_mult, 2)
+                        result = result.model_copy(
+                            update={
+                                "multiplier": round(new_mult, 4),
+                                "amount": new_amount,
+                                "rebalance_reason": (
+                                    f"再平衡：低配 {(-drift):.1%}（目标 {tw:.1%}，实际 {aw:.1%}），"
+                                    f"建议加码倍数 ×{factor:.2f}"
+                                ),
+                                "weight_drift": drift,
+                                "actual_weight": aw,
+                            }
+                        )
+                        # Keep existing reason, but append a short rebalance note.
+                        result.reason = result.reason + "；" + (
+                            result.rebalance_reason or ""
+                        )
+                    else:
+                        result = result.model_copy(
+                            update={
+                                "rebalance_reason": (
+                                    f"再平衡：低配 {(-drift):.1%}（目标 {tw:.1%}，实际 {aw:.1%}），"
+                                    "但当前信号不在买入状态，保留原建议"
+                                ),
+                                "weight_drift": drift,
+                                "actual_weight": aw,
+                            }
+                        )
+                else:
+                    # Excess-weight: output an independent reduce suggestion.
+                    excess = drift
+                    ratio = (
+                        inputs.rebalance_reduce_coeff
+                        * excess
+                        / max(aw, 1e-9)
+                        if aw > 0
+                        else 0.0
+                    )
+                    ratio = max(0.0, min(1.0, ratio))
+                    if result.action != "reduce" and ratio > 0:
+                        result = result.model_copy(
+                            update={
+                                "action": "reduce",
+                                "reduce_ratio": round(ratio, 4),
+                                "multiplier": 0.0,
+                                "amount": 0.0,
+                                "rebalance_reason": (
+                                    f"再平衡：超配 {excess:.1%}（目标 {tw:.1%}，实际 {aw:.1%}），"
+                                    f"建议减仓 {ratio:.0%}"
+                                ),
+                                "weight_drift": drift,
+                                "actual_weight": aw,
+                            }
+                        )
+                        result.reason = result.reason + "；" + (
+                            result.rebalance_reason or ""
+                        )
+                    else:
+                        result = result.model_copy(
+                            update={
+                                "rebalance_reason": (
+                                    f"再平衡：超配 {excess:.1%}（目标 {tw:.1%}，实际 {aw:.1%}），"
+                                    "但已有减仓/止盈建议，保留"
+                                ),
+                                "weight_drift": drift,
+                                "actual_weight": aw,
+                            }
+                        )
+            else:
+                result = result.model_copy(
+                    update={"weight_drift": drift, "actual_weight": aw}
+                )
         items.append(result)
 
         base_h = hmap.get(sym.id) or Holding(symbol=sym.id)

@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 const nav = [
   { href: "/", label: "今日", full: "今日操作" },
   { href: "/strategies", label: "策略", full: "策略对比" },
+  { href: "/review", label: "复盘", full: "信号复盘" },
   { href: "/market", label: "行情", full: "标的详情" },
   { href: "/database", label: "数据", full: "数据库" },
   { href: "/settings", label: "设置", full: "持仓与设置" },
@@ -48,7 +49,7 @@ export function MobileBottomNav() {
       style={{ paddingBottom: "env(safe-area-inset-bottom, 0px)" }}
       aria-label="主导航"
     >
-      <ul className="mx-auto grid max-w-6xl grid-cols-5">
+      <ul className="mx-auto grid max-w-6xl grid-cols-6">
         {nav.map((item) => {
           const active = isActive(pathname, item.href);
           return (

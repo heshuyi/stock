@@ -23,6 +23,10 @@ export interface EnsembleItem {
   reason: string;
   strategies: StrategySignal[];
   hard_veto: boolean;
+  // R8 rebalance fields (optional, populated when drift >= threshold)
+  actual_weight?: number | null;
+  weight_drift?: number | null;
+  rebalance_reason?: string | null;
 }
 
 export type BuyFrequency = "daily" | "weekly" | "monthly";
@@ -72,11 +76,31 @@ export interface Holding {
   trend_state?: "bull" | "mild_bull" | "sandwich" | "bear" | null;
   trailing_armed?: boolean;
   trail_peak_price?: number | null;
+  /** 累计已收现金分红（含分红后的总回报口径） */
+  dividends_received?: number;
+}
+
+export type TradeKind = "deposit" | "buy" | "sell" | "dividend";
+
+export interface TradeInput {
+  symbol: string;
+  kind: TradeKind;
+  date?: string | null;
+  amount?: number | null;
+  price?: number | null;
+  shares?: number | null;
+  ratio?: number | null;
+  reinvest?: boolean;
+}
+
+export interface TradeRecord extends TradeInput {
+  applied_at: string;
 }
 
 export interface Portfolio {
   holdings: Holding[];
   cash: number;
+  trades?: TradeRecord[];
 }
 
 export interface UserSettings {
@@ -99,6 +123,20 @@ export interface UserSettings {
   growth_bear_policy: GrowthBearPolicy;
   /** soft 模式下的空头买入倍数（0–1） */
   growth_bear_mult: number;
+  /** 提醒推送（R7） */
+  notify_enabled: boolean;
+  notify_url: string;
+  notify_on_execution: boolean;
+  notify_on_signal_change: boolean;
+}
+
+export interface SignalHistoryEntry {
+  date: string;
+  execution_today: boolean;
+  total_buy_amount: number;
+  action_counts: { buy: number; pause: number; reduce: number; hold: number };
+  warning?: string | null;
+  forward: Record<string, number | null>;
 }
 
 export class ApiError extends Error {
@@ -323,6 +361,15 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(body),
     }),
+  saveTrade: (body: TradeInput) =>
+    request<{ portfolio: Portfolio; trade: TradeRecord }>("/api/portfolio/trades", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  signalHistory: (limit = 60) =>
+    request<{ history: SignalHistoryEntry[] }>(
+      `/api/signals/history?limit=${limit}`
+    ),
   settings: () => request<UserSettings>("/api/settings"),
   saveSettings: (body: UserSettings) =>
     request<UserSettings>("/api/settings", {

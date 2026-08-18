@@ -17,7 +17,7 @@ from app.db import (
     save_user_settings,
     seed_symbols_and_settings,
 )
-from app.models import Portfolio, UserSettings
+from app.models import Portfolio, TradeInput, UserSettings
 from app.services.engine import compute_dashboard
 from app.services.market_data import (
     backfill_idle_chunk,
@@ -79,6 +79,45 @@ async def dashboard_today():
     return await compute_dashboard()
 
 
+@app.get("/api/signals/history")
+async def signals_history(limit: int = Query(default=30, ge=1, le=365)):
+    """Review timeline (R6): recent daily snapshots + forward returns.
+
+    Registered before ``/api/signals/{date}`` so ``history`` is not captured
+    as a date path parameter.
+    """
+    from app.services.review import forward_returns_many
+
+    db = get_db()
+    docs = (
+        await db.signals_daily.find()
+        .sort("date", -1)
+        .limit(limit)
+        .to_list(length=limit)
+    )
+    dates = [doc.get("date") for doc in docs if doc.get("date")]
+    forwards = forward_returns_many(dates)
+    out = []
+    for doc in docs:
+        doc.pop("_id", None)
+        date = doc.get("date")
+        counts = {"buy": 0, "pause": 0, "reduce": 0, "hold": 0}
+        for item in doc.get("items") or []:
+            action = item.get("action", "hold")
+            counts[action] = counts.get(action, 0) + 1
+        out.append(
+            {
+                "date": date,
+                "execution_today": bool(doc.get("execution_today", False)),
+                "total_buy_amount": round(float(doc.get("total_buy_amount") or 0), 2),
+                "action_counts": counts,
+                "warning": doc.get("warning"),
+                "forward": forwards.get(date, {}) if date else {},
+            }
+        )
+    return {"history": out}
+
+
 @app.get("/api/signals/{date}")
 async def signals_by_date(date: str):
     """Historical or T-1 signals. Date is always clamped to <= warehouse T-1."""
@@ -103,9 +142,15 @@ async def market(symbol: str, limit: int = 365):
 
 
 async def _invalidate_dashboard_cache() -> None:
-    """Drop cached dashboard payloads so next reads recompute from fresh state."""
+    """Drop today's cached dashboard so the next read recomputes.
+
+    Historical ``signals_daily`` rows are kept for the /review timeline.
+    """
+    t1 = market_store.resolve_signal_date()
+    if not t1:
+        return
     db = get_db()
-    await db.signals_daily.delete_many({})
+    await db.signals_daily.delete_one({"date": t1})
 
 
 @app.get("/api/portfolio")
@@ -118,6 +163,38 @@ async def update_portfolio(portfolio: Portfolio):
     saved = await save_portfolio(portfolio)
     await _invalidate_dashboard_cache()
     return saved
+
+
+@app.post("/api/portfolio/trades")
+async def apply_trade_endpoint(trade: TradeInput):
+    """Reconcile the tracked position with a real executed trade (R2).
+
+    deposit / buy / sell / dividend all update shares, average cost, cash and
+    accumulated dividends; the change is persisted and cached signals dropped.
+    """
+    from app.services.ledger import LedgerError, apply_trade
+
+    portfolio = await get_portfolio()
+    work = portfolio.model_copy(deep=True)
+    t1 = market_store.resolve_signal_date()
+
+    def _price(symbol: str) -> float | None:
+        bar = (
+            market_store.get_latest_bar(symbol, on_or_before=t1) if t1 else None
+        )
+        if bar and bar.get("etf_close") is not None:
+            return float(bar["etf_close"])
+        if bar and bar.get("close") is not None:
+            return float(bar["close"])
+        return None
+
+    try:
+        updated, record = apply_trade(work, trade, _price)
+    except LedgerError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    await save_portfolio(updated)
+    await _invalidate_dashboard_cache()
+    return {"portfolio": updated, "trade": record}
 
 
 @app.get("/api/settings")
